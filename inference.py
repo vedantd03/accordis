@@ -40,7 +40,7 @@ import json
 import os
 import sys
 import textwrap
-from typing import Dict, List
+from typing import Dict
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -58,7 +58,7 @@ from accordis.server.tasks.task_easy import EasyTask
 from accordis.server.tasks.task_medium import MediumTask
 from accordis.server.tasks.task_hard import HardTask
 
-from server.utils.logger import logger
+from accordis.server.utils.logger import logger
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
@@ -92,6 +92,15 @@ SYSTEM_PROMPT = textwrap.dedent(
       has the freshest view of the current batch — its pending_txns reflects
       its own block having been committed by QC this tick.
 
+    FAULT DETECTION:
+      suspected_byzantine maps peer node_ids to true/false. A peer is flagged
+      true when its observed equivocation count meets or exceeds this node's
+      equivocation_threshold config. Lowering equivocation_threshold triggers
+      suspicion earlier (sensitive but more false positives under network jitter);
+      raising it requires stronger evidence before flagging (robust but slower
+      to react). When peers are suspected, prefer robustness over throughput:
+      reduce replication_batch_size and raise view_timeout_ms.
+
     Parameters and their safe ranges:
       view_timeout_ms:             200 - 10000  (ms before triggering a view change)
       pipeline_depth:              1 - 8        (concurrent in-flight rounds)
@@ -99,16 +108,27 @@ SYSTEM_PROMPT = textwrap.dedent(
       equivocation_threshold:      1 - 15       (votes before declaring equivocation)
       vote_aggregation_timeout_ms: 50 - 1000    (must be strictly less than view_timeout_ms / 2)
 
-    Respond with ONLY valid JSON — no prose, no code fences, no markdown. Example:
-    {
-      "node_0": {
-        "view_timeout_ms": 2000,
-        "pipeline_depth": 2,
-        "replication_batch_size": 64,
-        "equivocation_threshold": 5,
-        "vote_aggregation_timeout_ms": 500
+    OBSERVATION FORMAT:
+      Each step's observation is a JSON object with two top-level keys:
+        - "cluster_min_pending": integer — minimum pending_txns across all honest
+          nodes, your best observable signal for how close the episode is to ending.
+        - "nodes": object — keyed by node_id (e.g. "node_0", "node_1", ...),
+          each containing that node's local metrics: role, view, commit_tps,
+          pending_txns, pipeline_utilisation, qc_miss_streak, view_changes_recent,
+          suspected_byzantine, and current_config.
+
+    RESPONSE FORMAT:
+      Return a flat JSON object keyed by node_id — do NOT nest under "nodes" or
+      any other wrapper. Include every node_id present in the observation.
+      Respond with ONLY valid JSON — no prose, no code fences, no markdown.
+
+      Example (4-node cluster):
+      {
+        "node_0": {"view_timeout_ms": 3000, "pipeline_depth": 4, "replication_batch_size": 256, "equivocation_threshold": 3, "vote_aggregation_timeout_ms": 400},
+        "node_1": {"view_timeout_ms": 3000, "pipeline_depth": 4, "replication_batch_size": 256, "equivocation_threshold": 3, "vote_aggregation_timeout_ms": 400},
+        "node_2": {"view_timeout_ms": 3000, "pipeline_depth": 4, "replication_batch_size": 256, "equivocation_threshold": 3, "vote_aggregation_timeout_ms": 400},
+        "node_3": {"view_timeout_ms": 3000, "pipeline_depth": 4, "replication_batch_size": 256, "equivocation_threshold": 3, "vote_aggregation_timeout_ms": 400}
       }
-    }
     """
 ).strip()
 
@@ -141,6 +161,7 @@ def _obs_to_dict(obs_nodes: Dict[NodeID, AccordisObservation]) -> str:
             "pipeline_utilisation":   round(o.pipeline_utilisation, 2),
             "qc_miss_streak":         o.qc_formation_miss_streak,
             "view_changes_recent":    o.view_change_count_recent,
+            "suspected_byzantine":    o.suspected_byzantine,
             "current_config": {
                 "view_timeout_ms":             o.current_config.view_timeout_ms,
                 "pipeline_depth":              o.current_config.pipeline_depth,
@@ -176,7 +197,7 @@ def _get_llm_action(
         Current observations:
         {_obs_to_dict(obs.nodes)}
 
-        Return your BFT configuration for every node listed above.
+        Return your BFT configuration for every node_id found under "nodes" above.
         """
     ).strip()
 
@@ -235,23 +256,7 @@ def log_action(action: MultiNodeAction) -> None:
     logger.info(f"[ACTION] {json.dumps(action_dict)}")
 
 def log_observation(obs: MultiNodeObservation) -> None:
-    obs_dict = {nid: {
-        "role": o.current_role.value,
-        "view": o.current_view,
-        "commit_tps": round(o.commit_throughput_tps, 2),
-        "pending_txns": o.pending_txn_count,
-        "pipeline_utilisation": round(o.pipeline_utilisation, 2),
-        "qc_miss_streak": o.qc_formation_miss_streak,
-        "view_changes_recent": o.view_change_count_recent,
-        "current_config": {
-            "view_timeout_ms": o.current_config.view_timeout_ms,
-            "pipeline_depth": o.current_config.pipeline_depth,
-            "replication_batch_size": o.current_config.replication_batch_size,
-            "equivocation_threshold": o.current_config.equivocation_threshold,
-            "vote_aggregation_timeout_ms": o.current_config.vote_aggregation_timeout_ms,
-        },
-    } for nid, o in obs.nodes.items()}
-    logger.info(f"[OBSERVATION] {json.dumps(obs_dict)}")
+    logger.info(f"[OBSERVATION] {_obs_to_dict(obs.nodes)}")
 
 def log_end(steps: int, total_reward: float, score: float) -> None:
     logger.info(

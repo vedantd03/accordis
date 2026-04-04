@@ -491,6 +491,13 @@ class HotStuffSimulator:
                 max(0.0, 1.0 - (node.no_commit_streak / max(1, pipeline_depth * 5)))
             )
 
+            # Suspicion: flag peers whose equivocation count meets or exceeds the
+            # configured threshold. Cleared automatically when count drops below it
+            # (e.g. after a view change resets counters in a future version).
+            threshold = node.config.equivocation_threshold
+            for peer_id, count in node.equivocation_counts.items():
+                node.suspected_peers[peer_id] = count >= threshold
+
         # Advance view if QC formed
         if qc_formed:
             self._current_view += 1
