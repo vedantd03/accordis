@@ -22,14 +22,25 @@ except Exception as e:  # pragma: no cover
 try:
     from ..models import AccordisObservation, AccordisAction
     from .accordis_environment import AccordisEnvironment
-except ModuleNotFoundError:
-    from models import AccordisObservation
+    from .adapters import create_adapter
+except (ModuleNotFoundError, ImportError):
+    import sys
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from models import AccordisObservation, AccordisAction
     from server.accordis_environment import AccordisEnvironment
+    from server.adapters import create_adapter
+
+
+def _make_env() -> AccordisEnvironment:
+    """Factory function: create adapter then inject into environment."""
+    adapter = create_adapter()
+    return AccordisEnvironment(adapter=adapter)
 
 
 # Create the app with web interface and README integration
 app = create_app(
-    AccordisEnvironment,
+    _make_env,
     AccordisObservation,
     AccordisAction,
     env_name="accordis",
