@@ -58,6 +58,8 @@ from accordis.server.tasks.task_easy import EasyTask
 from accordis.server.tasks.task_medium import MediumTask
 from accordis.server.tasks.task_hard import HardTask
 
+from server.utils.logger import logger
+
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 ADAPTER_NAME = os.environ.get("ACCORDIS_ADAPTER", "simulated")
@@ -183,7 +185,7 @@ def _get_llm_action(
         text = llm.complete(SYSTEM_PROMPT, user_prompt)
         raw_configs = json.loads(text)
     except Exception as exc:
-        print(f"[DEBUG] LLM request or JSON parse failed: {exc}", flush=True)
+        logger.debug(f"[DEBUG] LLM request or JSON parse failed: {exc}", exc_info=True)
 
     node_actions: Dict[NodeID, AccordisAction] = {}
     for nid in node_ids:
@@ -214,13 +216,12 @@ def _get_llm_action(
 # ── Logging ────────────────────────────────────────────────────────────────────
 
 def log_start(task: str, adapter: str) -> None:
-    print(f"[START] task={task} adapter={adapter}", flush=True)
+    logger.info(f"[START] task={task} adapter={adapter}")
 
 
 def log_step(step: int, reward: float, total: float, done: bool) -> None:
-    print(
-        f"[STEP]  step={step} reward={reward:.1f} total={total:.1f} done={done}",
-        flush=True,
+    logger.info(
+        f"[STEP]  step={step} reward={reward:.1f} total={total:.1f} done={done}"
     )
 
 def log_action(action: MultiNodeAction) -> None:
@@ -231,7 +232,7 @@ def log_action(action: MultiNodeAction) -> None:
         "equivocation_threshold": a.equivocation_threshold,
         "vote_aggregation_timeout_ms": a.vote_aggregation_timeout_ms,
     } for nid, a in action.nodes.items()}
-    print(f"[ACTION] {json.dumps(action_dict)}", flush=True)
+    logger.info(f"[ACTION] {json.dumps(action_dict)}")
 
 def log_observation(obs: MultiNodeObservation) -> None:
     obs_dict = {nid: {
@@ -250,12 +251,11 @@ def log_observation(obs: MultiNodeObservation) -> None:
             "vote_aggregation_timeout_ms": o.current_config.vote_aggregation_timeout_ms,
         },
     } for nid, o in obs.nodes.items()}
-    print(f"[OBSERVATION] {json.dumps(obs_dict)}", flush=True)
+    logger.info(f"[OBSERVATION] {json.dumps(obs_dict)}")
 
 def log_end(steps: int, total_reward: float, score: float) -> None:
-    print(
-        f"[END]   steps={steps} total_reward={total_reward:.1f} score={score:.2f}",
-        flush=True,
+    logger.info(
+        f"[END]   steps={steps} total_reward={total_reward:.1f} score={score:.2f}"
     )
 
 
@@ -301,7 +301,7 @@ def main() -> None:
             score = task.grade(env._episode_log)
 
     except Exception as exc:
-        print(f"[DEBUG] Episode error: {exc}", flush=True, file=sys.stderr)
+        logger.debug(f"[DEBUG] Episode error: {exc}", exc_info=True)
 
     finally:
         try:

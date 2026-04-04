@@ -19,6 +19,12 @@ except Exception as e:  # pragma: no cover
         "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
     ) from e
 
+from dotenv import load_dotenv
+load_dotenv()
+
+from server.utils.logger import setup_logger
+setup_logger()
+
 from accordis.models import MultiNodeAction, MultiNodeObservation
 from accordis.server.accordis_environment import AccordisEnvironment
 from accordis.server.adapters import create_adapter
