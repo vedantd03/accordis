@@ -1,190 +1,289 @@
 """
-Inference Script Example
+Accordis Inference Script
 ===================================
-MANDATORY
-- Before submitting, ensure the following variables are defined in your environment configuration:
-    API_BASE_URL   The API endpoint for the LLM.
-    MODEL_NAME     The model identifier to use for inference.
-    HF_TOKEN       Your Hugging Face / API key.
-    LOCAL_IMAGE_NAME The name of the local image to use for the environment if you are using from_docker_image()
-                     method
+MANDATORY environment variables:
+    ACCORDIS_ADAPTER   Adapter to use: "simulated" (default) or "librabft".
 
-- Defaults are set only for API_BASE_URL and MODEL_NAME 
-    (and should reflect your active inference setup):
-    API_BASE_URL = os.getenv("API_BASE_URL", "<your-active-endpoint>")
-    MODEL_NAME = os.getenv("MODEL_NAME", "<your-active-model>")
-    
-- The inference script must be named `inference.py` and placed in the root directory of the project
-- Participants must use OpenAI Client for all LLM calls using above variables
+LLM selection (LLMClientFactory, priority order):
+    OPENAI_API_KEY     → OpenAI gpt-4o
+    GEMINI_API_KEY     → Google gemini-1.5-pro
+
+Optional:
+    ACCORDIS_TASK      Task difficulty: "easy" (default), "medium", "hard".
+    ACCORDIS_MAX_STEPS Override maximum steps per episode (default from task).
 
 STDOUT FORMAT
-- The script must emit exactly three line types to stdout, in this order:
+- The script emits exactly three line types to stdout, in this order:
 
-    [START] task=<task_name> env=<benchmark> model=<model_name>
-    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
-    [END]   success=<true|false> steps=<n> rewards=<r1,r2,...,rn>
+    [START] task=<task_name> adapter=<adapter>
+    [STEP]  step=<n> reward=<r> total=<cumulative> done=<True|False>
+    [END]   steps=<n> total_reward=<r> score=<s>
 
   Rules:
     - One [START] line at episode begin.
     - One [STEP] line per step, immediately after env.step() returns.
-    - One [END] line after env.close(), always emitted (even on exception).
-    - reward and rewards are formatted to 2 decimal places.
-    - done and success are lowercase booleans: true or false.
-    - error is the raw last_action_error string, or null if none.
+    - One [END] line after episode ends, always emitted (even on exception).
+    - reward and total_reward are formatted to 1 decimal place.
+    - score is formatted to 2 decimal places.
+    - done is a Python bool string (True or False).
     - All fields on a single line with no newlines within a line.
 
   Example:
-    [START] task=click-test env=miniwob model=Qwen3-VL-30B
-    [STEP] step=1 action=click('123') reward=0.00 done=false error=null
-    [STEP] step=2 action=fill('456','text') reward=0.00 done=false error=null
-    [STEP] step=3 action=click('789') reward=1.00 done=true error=null
-    [END] success=true steps=3 rewards=0.00,0.00,1.00
+    [START] task=easy adapter=simulated
+    [STEP]  step=1 reward=-1.0 total=-1.0 done=False
+    [STEP]  step=2 reward=59.0 total=58.0 done=False
+    ...
+    [END]   steps=87 total_reward=340.0 score=0.73
 """
 
-# TODO: Update this example inference script to match the specifics of your environment and task.
-# The provided code is a template to demonstrate how to structure your inference script, including logging and interaction with the environment.
-
-import asyncio
+import json
 import os
+import sys
 import textwrap
-from typing import List, Optional
+from typing import Dict, List
+from dotenv import load_dotenv
+load_dotenv()
 
-from openai import OpenAI
+from accordis.llm_factory import BaseLLMClient, LLMClientFactory
+from accordis.models import (
+    AccordisAction,
+    AccordisObservation,
+    MultiNodeAction,
+    MultiNodeObservation,
+    NodeID,
+)
+from accordis.server.accordis_environment import AccordisEnvironment
+from accordis.server.adapters import create_adapter
+from accordis.server.tasks.task_easy import EasyTask
+from accordis.server.tasks.task_medium import MediumTask
+from accordis.server.tasks.task_hard import HardTask
 
-from my_env_v4 import MyEnvV4Action, MyEnvV4Env
-IMAGE_NAME = os.getenv("IMAGE_NAME") # If you are using docker image 
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+# ── Configuration ──────────────────────────────────────────────────────────────
 
-API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
-MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
-TASK_NAME = os.getenv("MY_ENV_V4_TASK", "echo")
-BENCHMARK = os.getenv("MY_ENV_V4_BENCHMARK", "my_env_v4")
-MAX_STEPS = 8
-TEMPERATURE = 0.7
-MAX_TOKENS = 150
-SUCCESS_SCORE_THRESHOLD = 0.1  # normalized score in [0, 1]
-
-# Max possible reward: each token contributes 0.1, across all steps
-_MAX_REWARD_PER_STEP = MAX_TOKENS * 0.1
-MAX_TOTAL_REWARD = MAX_STEPS * _MAX_REWARD_PER_STEP
+ADAPTER_NAME = os.environ.get("ACCORDIS_ADAPTER", "simulated")
+TASK_NAME    = os.environ.get("ACCORDIS_TASK", "easy")
+MAX_STEPS    = int(os.environ.get("ACCORDIS_MAX_STEPS", "200"))
 
 SYSTEM_PROMPT = textwrap.dedent(
     """
-    You are interacting with a simple echo environment.
-    Each turn you must send a message. The environment will echo it back.
-    Reward is proportional to message length: reward = len(message) * 0.1
-    Your goal is to maximize total reward by sending meaningful, substantive messages.
-    Reply with exactly one message string — no quotes, no prefixes, just the message text.
+    You are an RL agent tuning Byzantine Fault-Tolerant (BFT) consensus parameters
+    for a cluster of honest nodes. Your goal is to maximise transaction throughput
+    and liveness while keeping the number of view changes low.
+
+    At each step you receive JSON observations for every honest node and must return
+    a JSON object mapping each node_id to its new BFT configuration.
+
+    Parameters and their safe ranges:
+      view_timeout_ms:             200 - 10000  (ms before triggering a view change)
+      pipeline_depth:              1 - 8        (concurrent in-flight rounds)
+      replication_batch_size:      1 - 512      (txns per proposal)
+      equivocation_threshold:      1 - 15       (votes before declaring equivocation)
+      vote_aggregation_timeout_ms: 50 - 1000    (must be strictly less than view_timeout_ms / 2)
+
+    Respond with ONLY valid JSON — no prose, no code fences, no markdown. Example:
+    {
+      "node_0": {
+        "view_timeout_ms": 2000,
+        "pipeline_depth": 2,
+        "replication_batch_size": 64,
+        "equivocation_threshold": 5,
+        "vote_aggregation_timeout_ms": 500
+      }
+    }
     """
 ).strip()
 
 
-def log_start(task: str, env: str, model: str) -> None:
-    print(f"[START] task={task} env={env} model={model}", flush=True)
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _select_task(name: str):
+    name = name.lower()
+    if name == "medium":
+        return MediumTask()
+    if name == "hard":
+        return HardTask()
+    return EasyTask(curriculum_level=1)
 
 
-def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
-    error_val = error if error else "null"
-    done_val = str(done).lower()
+def _obs_to_dict(obs_nodes: Dict[NodeID, AccordisObservation]) -> str:
+    """Compact JSON summary of all honest-node observations for the LLM."""
+    summary = {}
+    for nid, o in obs_nodes.items():
+        summary[nid] = {
+            "role":                   o.current_role.value,
+            "view":                   o.current_view,
+            "commit_tps":             round(o.commit_throughput_tps, 2),
+            "pending_txns":           o.pending_txn_count,
+            "pipeline_utilisation":   round(o.pipeline_utilisation, 2),
+            "qc_miss_streak":         o.qc_formation_miss_streak,
+            "view_changes_recent":    o.view_change_count_recent,
+            "current_config": {
+                "view_timeout_ms":             o.current_config.view_timeout_ms,
+                "pipeline_depth":              o.current_config.pipeline_depth,
+                "replication_batch_size":      o.current_config.replication_batch_size,
+                "equivocation_threshold":      o.current_config.equivocation_threshold,
+                "vote_aggregation_timeout_ms": o.current_config.vote_aggregation_timeout_ms,
+            },
+        }
+    return json.dumps(summary, indent=2)
+
+
+def _get_llm_action(
+    llm: BaseLLMClient,
+    step: int,
+    obs: MultiNodeObservation,
+    last_reward: float,
+) -> MultiNodeAction:
+    """Ask the LLM for a new BFT configuration and build a MultiNodeAction.
+
+    Falls back to the node's current config if the LLM response is not valid JSON
+    or is missing a node's entry.
+    """
+    node_ids = list(obs.nodes.keys())
+
+    user_prompt = textwrap.dedent(
+        f"""
+        Step: {step}
+        Last reward: {last_reward:.2f}
+        Current observations:
+        {_obs_to_dict(obs.nodes)}
+
+        Return your BFT configuration for every node listed above.
+        """
+    ).strip()
+
+    raw_configs: Dict = {}
+    try:
+        text = llm.complete(SYSTEM_PROMPT, user_prompt)
+        raw_configs = json.loads(text)
+    except Exception as exc:
+        print(f"[DEBUG] LLM request or JSON parse failed: {exc}", flush=True)
+
+    node_actions: Dict[NodeID, AccordisAction] = {}
+    for nid in node_ids:
+        cfg_raw   = raw_configs.get(nid, {})
+        prev_cfg  = obs.nodes[nid].current_config
+        node_actions[nid] = AccordisAction(
+            node_id=nid,
+            view_timeout_ms=int(
+                cfg_raw.get("view_timeout_ms", prev_cfg.view_timeout_ms)
+            ),
+            pipeline_depth=int(
+                cfg_raw.get("pipeline_depth", prev_cfg.pipeline_depth)
+            ),
+            replication_batch_size=int(
+                cfg_raw.get("replication_batch_size", prev_cfg.replication_batch_size)
+            ),
+            equivocation_threshold=int(
+                cfg_raw.get("equivocation_threshold", prev_cfg.equivocation_threshold)
+            ),
+            vote_aggregation_timeout_ms=int(
+                cfg_raw.get("vote_aggregation_timeout_ms", prev_cfg.vote_aggregation_timeout_ms)
+            ),
+        )
+
+    return MultiNodeAction(nodes=node_actions)
+
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+
+def log_start(task: str, adapter: str) -> None:
+    print(f"[START] task={task} adapter={adapter}", flush=True)
+
+
+def log_step(step: int, reward: float, total: float, done: bool) -> None:
     print(
-        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        f"[STEP]  step={step} reward={reward:.1f} total={total:.1f} done={done}",
+        flush=True,
+    )
+
+def log_action(action: MultiNodeAction) -> None:
+    action_dict = {nid: {
+        "view_timeout_ms": a.view_timeout_ms,
+        "pipeline_depth": a.pipeline_depth,
+        "replication_batch_size": a.replication_batch_size,
+        "equivocation_threshold": a.equivocation_threshold,
+        "vote_aggregation_timeout_ms": a.vote_aggregation_timeout_ms,
+    } for nid, a in action.nodes.items()}
+    print(f"[ACTION] {json.dumps(action_dict)}", flush=True)
+
+def log_observation(obs: MultiNodeObservation) -> None:
+    obs_dict = {nid: {
+        "role": o.current_role.value,
+        "view": o.current_view,
+        "commit_tps": round(o.commit_throughput_tps, 2),
+        "pending_txns": o.pending_txn_count,
+        "pipeline_utilisation": round(o.pipeline_utilisation, 2),
+        "qc_miss_streak": o.qc_formation_miss_streak,
+        "view_changes_recent": o.view_change_count_recent,
+        "current_config": {
+            "view_timeout_ms": o.current_config.view_timeout_ms,
+            "pipeline_depth": o.current_config.pipeline_depth,
+            "replication_batch_size": o.current_config.replication_batch_size,
+            "equivocation_threshold": o.current_config.equivocation_threshold,
+            "vote_aggregation_timeout_ms": o.current_config.vote_aggregation_timeout_ms,
+        },
+    } for nid, o in obs.nodes.items()}
+    print(f"[OBSERVATION] {json.dumps(obs_dict)}", flush=True)
+
+def log_end(steps: int, total_reward: float, score: float) -> None:
+    print(
+        f"[END]   steps={steps} total_reward={total_reward:.1f} score={score:.2f}",
         flush=True,
     )
 
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
+# ── Episode loop ───────────────────────────────────────────────────────────────
 
+def main() -> None:
+    task  = _select_task(TASK_NAME)
+    conds = task.get_initial_conditions()
 
-def build_user_prompt(step: int, last_echoed: str, last_reward: float, history: List[str]) -> str:
-    history_block = "\n".join(history[-4:]) if history else "None"
-    return textwrap.dedent(
-        f"""
-        Step: {step}
-        Last echoed message: {last_echoed!r}
-        Last reward: {last_reward:.2f}
-        Previous steps:
-        {history_block}
-        Send your next message.
-        """
-    ).strip()
+    env = AccordisEnvironment(adapter=create_adapter())
+    llm = LLMClientFactory.create()
 
+    log_start(TASK_NAME, ADAPTER_NAME)
 
-def get_model_message(client: OpenAI, step: int, last_echoed: str, last_reward: float, history: List[str]) -> str:
-    user_prompt = build_user_prompt(step, last_echoed, last_reward, history)
-    try:
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS,
-            stream=False,
-        )
-        text = (completion.choices[0].message.content or "").strip()
-        return text if text else "hello"
-    except Exception as exc:
-        print(f"[DEBUG] Model request failed: {exc}", flush=True)
-        return "hello"
-
-
-async def main() -> None:
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-
-    env = await MyEnvV4Env.from_docker_image(IMAGE_NAME)
-
-    history: List[str] = []
-    rewards: List[float] = []
-    steps_taken = 0
-    score = 0.0
-    success = False
-
-    log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
+    total_reward = 0.0
+    steps_taken  = 0
+    score        = 0.0
 
     try:
-        result = await env.reset() # OpenENV.reset()
-        last_echoed = result.observation.echoed_message
+        obs: MultiNodeObservation = env.reset(**conds)
+        log_observation(obs)
         last_reward = 0.0
 
-        for step in range(1, MAX_STEPS + 1):
-            if result.done:
-                break
+        episode_max_steps = conds.get("max_steps", MAX_STEPS)
+        for step in range(1, episode_max_steps + 1):
+            action = _get_llm_action(llm, step, obs, last_reward)
+            log_action(action)
+            obs    = env.step(action)
+            log_observation(obs)
 
-            message = get_model_message(client, step, last_echoed, last_reward, history)
+            reward       = float(obs.reward) if obs.reward is not None else 0.0
+            done         = bool(obs.done)
+            last_reward  = reward
+            total_reward += reward
+            steps_taken   = step
 
-            result = await env.step(MyEnvV4Action(message=message))
-            obs = result.observation
-
-            reward = result.reward or 0.0
-            done = result.done
-            error = None
-
-            rewards.append(reward)
-            steps_taken = step
-            last_echoed = obs.echoed_message
-            last_reward = reward
-
-            log_step(step=step, action=message, reward=reward, done=done, error=error)
-
-            history.append(f"Step {step}: {message!r} -> reward {reward:+.2f}")
+            log_step(step=step, reward=reward, total=total_reward, done=done)
 
             if done:
                 break
 
-        score = sum(rewards) / MAX_TOTAL_REWARD if MAX_TOTAL_REWARD > 0 else 0.0
-        score = min(max(score, 0.0), 1.0)  # clamp to [0, 1]
-        success = score >= SUCCESS_SCORE_THRESHOLD
+        if env._episode_log:
+            score = task.grade(env._episode_log)
+
+    except Exception as exc:
+        print(f"[DEBUG] Episode error: {exc}", flush=True, file=sys.stderr)
 
     finally:
         try:
-            await env.close()
-        except Exception as e:
-            print(f"[DEBUG] env.close() error (container cleanup): {e}", flush=True)
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+            env.close()
+        except Exception:
+            pass
+        log_end(steps=steps_taken, total_reward=total_reward, score=score)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
