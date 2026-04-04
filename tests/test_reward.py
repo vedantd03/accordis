@@ -1,7 +1,7 @@
 """Tests for RewardCalculator (adapter-agnostic)."""
 
 import pytest
-from models import (
+from accordis.models import (
     AccordisReward,
     AccordisState,
     BaselineComparison,
@@ -13,7 +13,7 @@ from models import (
     VerificationResult,
     VerifierResults,
 )
-from server.rewards.reward_calculator import (
+from accordis.server.rewards.reward_calculator import (
     RewardCalculator,
     LIVENESS_COST_PER_STEP,
     UNNECESSARY_VIEW_CHANGE,
@@ -24,7 +24,7 @@ from server.rewards.reward_calculator import (
     THROUGHPUT_IMPROVEMENT,
     LATENCY_IMPROVEMENT,
 )
-from server.oracle.verifier import CorrectnessOracle
+from accordis.server.oracle.verifier import CorrectnessOracle
 
 
 def make_state(step=1, view_change_count=0, n_commits=0, txns=None):

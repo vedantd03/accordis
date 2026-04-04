@@ -1,7 +1,7 @@
 """Tests for models.py — all Pydantic model validation."""
 
 import pytest
-from models import (
+from accordis.models import (
     AccordisAction,
     AccordisObservation,
     AccordisRubric,

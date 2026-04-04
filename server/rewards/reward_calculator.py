@@ -8,11 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from models import (
+from accordis.models import (
     AccordisReward,
     AccordisState,
     BaselineComparison,

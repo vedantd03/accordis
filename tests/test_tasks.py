@@ -1,7 +1,7 @@
 """Tests for task grading (adapter-agnostic)."""
 
 import pytest
-from models import (
+from accordis.models import (
     AccordisReward,
     AccordisState,
     BFAStrategy,
@@ -11,9 +11,9 @@ from models import (
     ProposalRegistry,
     Transaction,
 )
-from server.tasks.task_easy import EasyTask
-from server.tasks.task_medium import MediumTask
-from server.tasks.task_hard import HardTask
+from accordis.server.tasks.task_easy import EasyTask
+from accordis.server.tasks.task_medium import MediumTask
+from accordis.server.tasks.task_hard import HardTask
 
 
 def make_episode_log(liveness_rate=0.9, view_change_count=2, agreement_ok=True, n_commits=9):
@@ -143,17 +143,17 @@ class TestHardTask:
         assert cond["n_nodes"] == 10
         assert cond["f_byzantine"] == 3
         assert cond["max_steps"] == 500
-        from models import LeaderRotation
+        from accordis.models import LeaderRotation
         assert cond["leader_rotation"] == LeaderRotation.ROUND_ROBIN
 
     def test_get_initial_conditions_level7_vrf(self):
-        from models import LeaderRotation
+        from accordis.models import LeaderRotation
         task = HardTask(curriculum_level=7)
         cond = task.get_initial_conditions()
         assert cond["leader_rotation"] == LeaderRotation.VRF
 
     def test_get_initial_conditions_level8_reputation(self):
-        from models import LeaderRotation
+        from accordis.models import LeaderRotation
         task = HardTask(curriculum_level=8)
         cond = task.get_initial_conditions()
         assert cond["leader_rotation"] == LeaderRotation.REPUTATION_WEIGHTED

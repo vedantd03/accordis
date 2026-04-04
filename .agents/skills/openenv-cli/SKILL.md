@@ -1,3 +1,12 @@
+
+
+---
+name: accordis
+description: "Accordis is an OpenEnv reinforcement learning environment for tuning and evaluating Byzantine fault-tolerant consensus protocols under adversarial network conditions."
+---
+The OpenEnv CLI command `openenv` is available.
+Use `openenv --help` to view available commands.
+
 # SKILL.md — AccordisEnvironment: Self-Adaptive BFT Consensus Tuning Environment
 
 > **For the coding agent:** Before implementing anything, read the OpenEnv SDK reference at:
@@ -7,6 +16,7 @@
 > in this project must be imported from the SDK. Do not create parallel base classes.
 >
 > Confirmed OpenEnv imports:
+>
 > ```
 > from openenv.core import EnvClient
 > from openenv.core.client_types import StepResult
@@ -20,17 +30,17 @@
 
 ## Environment Identity
 
-| Field               | Value                                              |
-|---------------------|----------------------------------------------------|
-| Environment ID      | `AccordisEnvironment`                              |
+| Field               | Value                                               |
+| ------------------- | --------------------------------------------------- |
+| Environment ID      | `AccordisEnvironment`                             |
 | Formulation         | POMDP — partially observable, adversarial          |
-| Consensus Engine    | Pluggable via `BaseConsensusAdapter`               |
-| Version 1 Engine    | In-memory HotStuff simulator (zero dependencies)  |
-| Version 2 Engine    | LibraBFT (HotStuff, `diem/diem`, Rust)            |
-| Network Injection   | Version 1: synthetic Pareto latency model          |
-|                     | Version 2: Toxiproxy (real TCP-level faults)       |
-| Byzantine Injection | Version 1: internal BFA state machine              |
-|                     | Version 2: Twins methodology (LibraBFT native)     |
+| Consensus Engine    | Pluggable via `BaseConsensusAdapter`              |
+| Version 1 Engine    | In-memory HotStuff simulator (zero dependencies)    |
+| Version 2 Engine    | LibraBFT (HotStuff,`diem/diem`, Rust)             |
+| Network Injection   | Version 1: synthetic Pareto latency model           |
+|                     | Version 2: Toxiproxy (real TCP-level faults)        |
+| Byzantine Injection | Version 1: internal BFA state machine               |
+|                     | Version 2: Twins methodology (LibraBFT native)      |
 | Crypto Verification | Disabled in both versions — vote-count quorum stub |
 | OpenEnv Compliant   | Yes — RLVE verifiable reward oracle                |
 
@@ -575,6 +585,7 @@ def __init__(self, adapter: BaseConsensusAdapter):
 #### Responsibility Boundary
 
 AccordisEnvironment is responsible for:
+
 - Orchestrating the episode loop: reset, step, done detection
 - Clamping agent actions to SAFE_BFT_TUNING_BOUNDS before passing to adapter
 - Delegating all consensus execution to `self._adapter`
@@ -585,6 +596,7 @@ AccordisEnvironment is responsible for:
 - Enforcing the episode horizon
 
 AccordisEnvironment is **not** responsible for:
+
 - How nodes are started, stopped, or configured internally
 - How network latency is injected (real or simulated)
 - How Byzantine behaviors are implemented at the protocol level
@@ -1268,6 +1280,7 @@ The only change required is at the **construction site** — the single `create_
 **Mechanism 1 — Import firewall on `accordis_environment.py`.**
 
 Permitted imports in `accordis_environment.py`:
+
 ```
 models
 server/adapters/base.py   (interface only, never implementations)
@@ -1277,6 +1290,7 @@ server/rewards/reward_calculator.py
 server/curriculum/manager.py
 standard library
 ```
+
 Any import from `server/adapters/simulated/` or `server/adapters/librabft/` is a
 **violation** that breaks the swappability guarantee. CI must check this.
 
@@ -1339,6 +1353,7 @@ create_adapter(version: Optional[str] = None) → BaseConsensusAdapter
 ```
 
 `app.py` usage:
+
 ```python
 from server.adapters import create_adapter
 from server.accordis_environment import AccordisEnvironment
@@ -1451,6 +1466,7 @@ Runs one episode using an LLM agent. The adapter version is selected via
 identical regardless of version.
 
 Required log format:
+
 ```
 [START] task=easy adapter=simulated
 [STEP]  step=0 reward=-1.0 total=-1.0 done=False
@@ -1564,6 +1580,7 @@ This defines the exact steps to migrate. No shared component is modified during 
 ### Pre-Migration Gate
 
 Before beginning Version 2 implementation, all of the following must be true:
+
 - All `test_environment.py` tests pass with `ACCORDIS_ADAPTER=simulated`
 - All adapter-agnostic tests pass (`test_verifier.py`, `test_reward.py`, `test_tasks.py`)
 - `openenv validate accordis/` passes with `ACCORDIS_ADAPTER=simulated`
@@ -1581,6 +1598,7 @@ cargo build --release \
 ```
 
 Features used:
+
 - `no-bls-verify`: stubs BLS signature checks → vote-count quorum only
 - `twins`: enables Twins injection gRPC endpoint on management port
 - `simulation-clock`: enables `AdvanceClock` gRPC method for deterministic ticking
@@ -1600,6 +1618,7 @@ to `SimulatedConsensusAdapter.read_observation()`.
 ### Step 4 — Metrics Dict Parity Test
 
 Write (or run existing) parity test that confirms:
+
 - Both adapters return dicts with exactly the same 12 keys
 - Value types match for each key
 - `AccordisTransform.transform()` produces a valid `AccordisObservation` from both
@@ -1725,19 +1744,21 @@ Phase 16   Write Version 2 Dockerfile. Build. Validate. Deploy to Hugging Face S
 
 ## Invariants the Agent Must Never Violate
 
-| Invariant | Enforcement Point |
-|-----------|-------------------|
-| All models defined only in `models.py` | No model defined under `server/` |
-| All tests in `accordis/tests/` | Directory structure |
-| `accordis_environment.py` imports only `BaseConsensusAdapter`, never implementations | Import firewall |
-| `AccordisEnvironment.__init__` accepts adapter as parameter, never constructs one | Constructor signature |
-| Both adapters produce identical raw metrics dict key set | Parity test, Phase 15 |
-| `quorum_size = 2f+1` enforced by adapter, never configurable from environment | Adapter invariant |
-| BFAStrategy-to-behavior translation happens inside the adapter, not in `bfa.py` | Responsibility boundary |
-| `CorrectnessOracle` never calls the adapter | Oracle reads `AccordisState` only |
-| `RewardCalculator` never calls the adapter | Calculator reads `AccordisState` only |
-| BFA seed guarantees reproducible trajectories in both versions | Seeded PRNG in adapter and bfa.py |
-| `inject_byzantine_action()` effect is consumed after exactly one tick | Adapter invariant |
-| `ACCORDIS_ADAPTER=simulated` requires zero external dependencies | Simulated adapter constraint |
-| Swapping adapters requires zero changes outside `create_adapter()` | Design constraint |
-| `[START]` / `[STEP]` / `[END]` log format in `inference.py` | Output format |
+| Invariant                                                                                | Enforcement Point                       |
+| ---------------------------------------------------------------------------------------- | --------------------------------------- |
+| All models defined only in `models.py`                                                 | No model defined under `server/`      |
+| All tests in `accordis/tests/`                                                         | Directory structure                     |
+| `accordis_environment.py` imports only `BaseConsensusAdapter`, never implementations | Import firewall                         |
+| `AccordisEnvironment.__init__` accepts adapter as parameter, never constructs one      | Constructor signature                   |
+| Both adapters produce identical raw metrics dict key set                                 | Parity test, Phase 15                   |
+| `quorum_size = 2f+1` enforced by adapter, never configurable from environment          | Adapter invariant                       |
+| BFAStrategy-to-behavior translation happens inside the adapter, not in `bfa.py`        | Responsibility boundary                 |
+| `CorrectnessOracle` never calls the adapter                                            | Oracle reads `AccordisState` only     |
+| `RewardCalculator` never calls the adapter                                             | Calculator reads `AccordisState` only |
+| BFA seed guarantees reproducible trajectories in both versions                           | Seeded PRNG in adapter and bfa.py       |
+| `inject_byzantine_action()` effect is consumed after exactly one tick                  | Adapter invariant                       |
+| `ACCORDIS_ADAPTER=simulated` requires zero external dependencies                       | Simulated adapter constraint            |
+| Swapping adapters requires zero changes outside `create_adapter()`                     | Design constraint                       |
+| `[START]` / `[STEP]` / `[END]` log format in `inference.py`                      | Output format                           |
+
+---

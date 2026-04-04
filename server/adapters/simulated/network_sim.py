@@ -11,11 +11,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-
-from server.network.fault_profiles import FaultProfile, get_fault_profile
+from accordis.server.network.fault_profiles import FaultProfile, get_fault_profile
 
 
 @dataclass

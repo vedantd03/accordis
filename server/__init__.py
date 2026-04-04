@@ -6,6 +6,6 @@
 
 """Accordis environment server components."""
 
-from server.accordis_environment import AccordisEnvironment
+from accordis.server.accordis_environment import AccordisEnvironment
 
 __all__ = ["AccordisEnvironment"]

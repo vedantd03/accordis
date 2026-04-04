@@ -11,11 +11,7 @@ import statistics
 from collections import deque
 from typing import Any, Dict, List, Optional
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-
-from models import (
+from accordis.models import (
     BFAStrategy,
     BFTConfig,
     Block,
@@ -25,11 +21,11 @@ from models import (
     Phase,
     Transaction,
 )
-from server.adapters.base import BaseConsensusAdapter
-from server.adapters.simulated.hotstuff_sim import HotStuffSimulator, SimulatedNode
-from server.adapters.simulated.network_sim import NetworkSimulator
-from server.adapters.simulated.bfa_sim import ByzantineInjector
-from server.network.fault_profiles import get_fault_profile
+from accordis.server.adapters.base import BaseConsensusAdapter
+from accordis.server.adapters.simulated.hotstuff_sim import HotStuffSimulator, SimulatedNode
+from accordis.server.adapters.simulated.network_sim import NetworkSimulator
+from accordis.server.adapters.simulated.bfa_sim import ByzantineInjector
+from accordis.server.network.fault_profiles import get_fault_profile
 
 
 class SimulatedConsensusAdapter(BaseConsensusAdapter):

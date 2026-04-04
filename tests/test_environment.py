@@ -1,15 +1,15 @@
 """Tests for AccordisEnvironment reset/step with SimulatedConsensusAdapter."""
 
 import pytest
-from models import (
+from accordis.models import (
     AccordisAction,
     AccordisObservation,
     BFTConfig,
     LeaderRotation,
     STATIC_BASELINE_CONFIG,
 )
-from server.adapters.simulated.adapter import SimulatedConsensusAdapter
-from server.accordis_environment import AccordisEnvironment
+from accordis.server.adapters.simulated.adapter import SimulatedConsensusAdapter
+from accordis.server.accordis_environment import AccordisEnvironment
 
 
 @pytest.fixture
@@ -186,7 +186,7 @@ class TestClampAction:
         assert clamped.vote_aggregation_timeout_ms < clamped.view_timeout_ms // 2
 
     def test_all_fields_in_bounds(self, env):
-        from models import SAFE_BFT_TUNING_BOUNDS
+        from accordis.models import SAFE_BFT_TUNING_BOUNDS
         env.reset()
         action = AccordisAction(
             node_id="node_0",

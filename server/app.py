@@ -19,17 +19,9 @@ except Exception as e:  # pragma: no cover
         "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
     ) from e
 
-try:
-    from ..models import AccordisObservation, AccordisAction
-    from .accordis_environment import AccordisEnvironment
-    from .adapters import create_adapter
-except (ModuleNotFoundError, ImportError):
-    import sys
-    import os
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from models import AccordisObservation, AccordisAction
-    from server.accordis_environment import AccordisEnvironment
-    from server.adapters import create_adapter
+from accordis.models import AccordisObservation, AccordisAction
+from accordis.server.accordis_environment import AccordisEnvironment
+from accordis.server.adapters import create_adapter
 
 
 def _make_env() -> AccordisEnvironment:

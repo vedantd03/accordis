@@ -10,11 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import List
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from models import NodeID, BFTConfig, BFAStrategy, LeaderRotation
+from accordis.models import NodeID, BFTConfig, BFAStrategy, LeaderRotation
 
 
 class BaseConsensusAdapter(ABC):

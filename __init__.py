@@ -6,7 +6,7 @@
 
 """Accordis synchronous distributed-consensus environment package."""
 
-from .models import (
+from accordis.models import (
     AccordisAction,
     AccordisObservation,
 )

@@ -9,11 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Dict, List
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from models import AccordisRubric, BFAStrategy, EpisodeLog, LeaderRotation
+from accordis.models import AccordisRubric, BFAStrategy, EpisodeLog, LeaderRotation
 
 
 class BaseTask(ABC):

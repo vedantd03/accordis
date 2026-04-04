@@ -1,7 +1,7 @@
 """Tests for CorrectnessOracle (adapter-agnostic)."""
 
 import pytest
-from models import (
+from accordis.models import (
     AccordisState,
     BFAStrategy,
     Block,
@@ -12,7 +12,7 @@ from models import (
     Transaction,
     VerificationResult,
 )
-from server.oracle.verifier import CorrectnessOracle
+from accordis.server.oracle.verifier import CorrectnessOracle
 
 
 def make_state(honest_logs=None, byzantine_ids=None, txn_pool=None, view_change_count=0):

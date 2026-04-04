@@ -1,8 +1,8 @@
 """Tests for SimulatedConsensusAdapter internals (Version 1 only)."""
 
 import pytest
-from models import BFAStrategy, BFTConfig, LeaderRotation
-from server.adapters.simulated.adapter import SimulatedConsensusAdapter
+from accordis.models import BFAStrategy, BFTConfig, LeaderRotation
+from accordis.server.adapters.simulated.adapter import SimulatedConsensusAdapter
 
 
 @pytest.fixture

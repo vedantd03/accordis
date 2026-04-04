@@ -5,10 +5,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from server.adapters.base import BaseConsensusAdapter
+from accordis.server.adapters.base import BaseConsensusAdapter
 
 
 def create_adapter(adapter_type: Optional[str] = None, **kwargs) -> BaseConsensusAdapter:
@@ -28,7 +25,7 @@ def create_adapter(adapter_type: Optional[str] = None, **kwargs) -> BaseConsensu
     adapter_type = adapter_type.lower()
 
     if adapter_type == "simulated":
-        from server.adapters.simulated.adapter import SimulatedConsensusAdapter
+        from accordis.server.adapters.simulated.adapter import SimulatedConsensusAdapter
         seed = kwargs.get("seed", 42)
         return SimulatedConsensusAdapter(seed=seed)
 

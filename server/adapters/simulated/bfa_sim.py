@@ -9,11 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-
-from models import BFAStrategy, NodeID
+from accordis.models import BFAStrategy, NodeID
 
 
 class ByzantineInjector:

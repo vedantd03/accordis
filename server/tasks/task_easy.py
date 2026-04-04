@@ -5,13 +5,9 @@ Goal: Achieve and maintain consensus under stable conditions.
 
 from __future__ import annotations
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from models import EpisodeLog, LeaderRotation
-from server.tasks.base_task import BaseTask
-from server.oracle.verifier import CorrectnessOracle
+from accordis.models import EpisodeLog, LeaderRotation
+from accordis.server.tasks.base_task import BaseTask
+from accordis.server.oracle.verifier import CorrectnessOracle
 
 
 class EasyTask(BaseTask):

@@ -9,11 +9,7 @@ from __future__ import annotations
 import random
 from typing import Dict, List, Optional
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from models import BFAStrategy, BFTConfig, NodeID
+from accordis.models import BFAStrategy, BFTConfig, NodeID
 
 
 STRATEGY_POOL: Dict[int, List[BFAStrategy]] = {

@@ -14,11 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from models import (
+from accordis.models import (
     AccordisAction,
     AccordisObservation,
     AccordisReward,
@@ -40,11 +36,11 @@ from models import (
     STATIC_BASELINE_CONFIG,
     Transaction,
 )
-from server.adapters.base import BaseConsensusAdapter
-from server.adversary.bfa import ByzantineFailureAgent
-from server.oracle.verifier import CorrectnessOracle
-from server.rewards.reward_calculator import RewardCalculator
-from server.curriculum.manager import CurriculumManager
+from accordis.server.adapters.base import BaseConsensusAdapter
+from accordis.server.adversary.bfa import ByzantineFailureAgent
+from accordis.server.oracle.verifier import CorrectnessOracle
+from accordis.server.rewards.reward_calculator import RewardCalculator
+from accordis.server.curriculum.manager import CurriculumManager
 
 
 class AccordisEnvironment(Environment):
