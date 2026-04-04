@@ -169,9 +169,9 @@ class SimulatedConsensusAdapter(BaseConsensusAdapter):
             else:
                 inter_message_variance[sender] = 0.0
 
-        # TPS computation
-        elapsed = max(1, node.ticks_elapsed)
-        committed_tps = node.total_committed_txns / elapsed
+        # TPS computation: average over the rolling window (last 10 ticks)
+        window = node.recent_commit_counts
+        committed_tps = sum(window) / max(1, len(window))
 
         # Pending count: total submitted - committed
         committed_ids: set = set()
@@ -207,6 +207,9 @@ class SimulatedConsensusAdapter(BaseConsensusAdapter):
 
     def get_byzantine_nodes(self) -> List[NodeID]:
         return list(self._byzantine_nodes)
+
+    def get_finalized_txn_count(self) -> int:
+        return len(self._hotstuff.get_committed_txn_ids())
 
     # ── Byzantine Injection ──────────────────────────────────────────────────
 

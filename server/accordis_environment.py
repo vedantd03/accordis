@@ -272,6 +272,7 @@ class AccordisEnvironment(Environment):
         self._state.step = step
         self._state.view_change_count = view_change_total
         self._state.bfa_strategy = strategy
+        self._state.finalized_txn_count = self._adapter.get_finalized_txn_count()
 
         # Step 8: Correctness oracle
         verifier_results = self._oracle.run_all(self._state)

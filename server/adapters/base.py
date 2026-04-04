@@ -98,6 +98,15 @@ class BaseConsensusAdapter(ABC):
         ...
 
     @abstractmethod
+    def get_finalized_txn_count(self) -> int:
+        """Return the number of transactions for which a QC has been formed.
+        This is the authoritative finality signal — independent of per-node
+        propagation lag. A transaction counts the moment 2f+1 votes produced
+        a QC, before replicas have necessarily delivered it.
+        """
+        ...
+
+    @abstractmethod
     def get_byzantine_nodes(self) -> List[NodeID]:
         """Return the current list of Byzantine node IDs."""
         ...

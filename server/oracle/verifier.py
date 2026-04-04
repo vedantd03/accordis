@@ -89,20 +89,15 @@ class CorrectnessOracle:
     def check_liveness(self, state: AccordisState) -> LivenessResult:
         """Compute liveness metrics from current state.
 
+        committed_count is taken from state.finalized_txn_count — the number of
+        transactions for which a QC was formed by the adapter. This is the
+        authoritative finality signal: a transaction is committed the moment
+        2f+1 honest votes produced a QC, independent of per-node propagation lag.
+
         liveness_rate = committed_count / max(submitted_count, 1)
         """
         submitted_count = len(state.episode_txn_pool)
-
-        # Count unique committed transactions across all honest nodes
-        committed_ids: set = set()
-        for nid, ns in state.node_states.items():
-            if ns.is_byzantine:
-                continue
-            for block in ns.committed_log:
-                for tx in block.transactions:
-                    committed_ids.add(tx.id)
-
-        committed_count = len(committed_ids)
+        committed_count = state.finalized_txn_count
         pending_count = max(0, submitted_count - committed_count)
         liveness_rate = committed_count / max(submitted_count, 1)
 

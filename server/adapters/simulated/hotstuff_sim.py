@@ -81,6 +81,8 @@ class SimulatedNode:
         # For TPS computation
         self.total_committed_txns: int = 0
         self.ticks_elapsed: int = 0
+        # Rolling window of per-tick committed counts (last 10 ticks) for recent TPS
+        self.recent_commit_counts: Deque[int] = deque(maxlen=10)
 
         # Pipeline tracking
         self.pipeline_utilisation: float = 0.0
@@ -428,35 +430,38 @@ class HotStuffSimulator:
                     self._trigger_view_change(leader_id)
 
         # ── DECIDE: Commit the block on all nodes that received QC ────────────
-        committed_any = False
+        # Track which nodes committed this tick and how many txns each committed.
+        # QC messages arrive one tick after broadcast (network delivery lag), so we
+        # accept any QC for a view strictly less than the current view.
+        nodes_that_committed: Dict[NodeID, int] = {}
         for nid, node in self._nodes.items():
             if node.is_byzantine:
                 continue
 
+            existing_slots = {b.slot for b in node.committed_log}
             for msg in node.inbound_queue:
-                if msg.msg_type == QC and msg.payload.get("view") == view:
+                if msg.msg_type == QC and msg.payload.get("view") < view:
                     block_in_qc = msg.payload.get("block")
                     if block_in_qc and isinstance(block_in_qc, Block):
-                        # Check not already committed
-                        existing_slots = {b.slot for b in node.committed_log}
                         if block_in_qc.slot not in existing_slots:
+                            existing_slots.add(block_in_qc.slot)
                             node.committed_log.append(block_in_qc)
                             for tx in block_in_qc.transactions:
                                 self._committed_txn_ids.add(tx.id)
-                            node.total_committed_txns += len(block_in_qc.transactions)
-                            committed_any = True
-                    node.phase_latency_history[Phase.DECIDE.value].append(float(self._current_tick))
-                    break
+                            count = len(block_in_qc.transactions)
+                            node.total_committed_txns += count
+                            nodes_that_committed[nid] = nodes_that_committed.get(nid, 0) + count
+                            node.phase_latency_history[Phase.DECIDE.value].append(float(self._current_tick))
 
             # Leader also commits its own block if QC formed
             if nid == leader_id and qc_formed and committed_block:
-                existing_slots = {b.slot for b in node.committed_log}
                 if committed_block.slot not in existing_slots:
                     node.committed_log.append(committed_block)
                     for tx in committed_block.transactions:
                         self._committed_txn_ids.add(tx.id)
-                    node.total_committed_txns += len(committed_block.transactions)
-                    committed_any = True
+                    count = len(committed_block.transactions)
+                    node.total_committed_txns += count
+                    nodes_that_committed[nid] = nodes_that_committed.get(nid, 0) + count
 
         # ── Metrics Update ────────────────────────────────────────────────────
         for nid, node in self._nodes.items():
@@ -468,7 +473,10 @@ class HotStuffSimulator:
                 continue
             node.ticks_elapsed += 1
 
-            if committed_any:
+            txns_this_tick = nodes_that_committed.get(nid, 0)
+            node.recent_commit_counts.append(txns_this_tick)
+
+            if txns_this_tick > 0:
                 node.no_commit_streak = 0
                 node.qc_miss_streak = 0
             else:

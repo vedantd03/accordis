@@ -182,9 +182,10 @@ class AccordisState(State):
     leader_rotation:   LeaderRotation = LeaderRotation.ROUND_ROBIN
     node_states:       Dict[NodeID, NodeState] = Field(default_factory=dict)
     view_change_count: int = 0
-    bfa_strategy:      BFAStrategy = BFAStrategy.NONE
-    proposal_registry: ProposalRegistry = Field(default_factory=ProposalRegistry)
-    episode_txn_pool:  List[Transaction] = Field(default_factory=list)
+    bfa_strategy:        BFAStrategy = BFAStrategy.NONE
+    proposal_registry:   ProposalRegistry = Field(default_factory=ProposalRegistry)
+    episode_txn_pool:    List[Transaction] = Field(default_factory=list)
+    finalized_txn_count: int = 0  # txns with a confirmed QC; set by environment from adapter
 
 
 class VerificationResult(BaseModel):
