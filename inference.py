@@ -73,6 +73,23 @@ SYSTEM_PROMPT = textwrap.dedent(
     At each step you receive JSON observations for every honest node and must return
     a JSON object mapping each node_id to its new BFT configuration.
 
+    PARTIAL OBSERVABILITY — read this carefully:
+      Each node's observation reflects only its own local log. Because QC messages
+      propagate over a simulated network with variable latency, nodes' pending_txns
+      values will diverge: the current leader commits its block immediately on QC
+      formation, while replicas apply the same block one or more ticks later.
+
+      The episode ends when all transactions have been finalized by QC — which
+      happens before every replica's local log has fully caught up. This means
+      done=True can arrive while some nodes still show pending_txns > 0.
+
+      To track cluster-wide progress, use cluster_min_pending in the observation
+      summary: this is the lowest pending_txns across all honest nodes and gives
+      the best observable lower bound on remaining work. When cluster_min_pending
+      approaches 0, the episode is close to ending. The node with role="leader"
+      has the freshest view of the current batch — its pending_txns reflects
+      its own block having been committed by QC this tick.
+
     Parameters and their safe ranges:
       view_timeout_ms:             200 - 10000  (ms before triggering a view change)
       pipeline_depth:              1 - 8        (concurrent in-flight rounds)
@@ -106,10 +123,15 @@ def _select_task(name: str):
 
 
 def _obs_to_dict(obs_nodes: Dict[NodeID, AccordisObservation]) -> str:
-    """Compact JSON summary of all honest-node observations for the LLM."""
-    summary = {}
+    """Compact JSON summary of all honest-node observations for the LLM.
+
+    Includes a top-level cluster_min_pending field: the minimum pending_txns
+    across all honest nodes. This is derived entirely from per-node observable
+    data and gives the best lower bound on remaining cluster work.
+    """
+    node_summary = {}
     for nid, o in obs_nodes.items():
-        summary[nid] = {
+        node_summary[nid] = {
             "role":                   o.current_role.value,
             "view":                   o.current_view,
             "commit_tps":             round(o.commit_throughput_tps, 2),
@@ -125,6 +147,10 @@ def _obs_to_dict(obs_nodes: Dict[NodeID, AccordisObservation]) -> str:
                 "vote_aggregation_timeout_ms": o.current_config.vote_aggregation_timeout_ms,
             },
         }
+
+    cluster_min_pending = min(o.pending_txn_count for o in obs_nodes.values())
+
+    summary = {"cluster_min_pending": cluster_min_pending, "nodes": node_summary}
     return json.dumps(summary, indent=2)
 
 
