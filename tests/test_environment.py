@@ -6,6 +6,8 @@ from accordis.models import (
     AccordisObservation,
     BFTConfig,
     LeaderRotation,
+    MultiNodeAction,
+    MultiNodeObservation,
     STATIC_BASELINE_CONFIG,
 )
 from accordis.server.adapters.simulated.adapter import SimulatedConsensusAdapter
@@ -19,21 +21,21 @@ def env():
 
 
 class TestReset:
-    def test_reset_returns_obs_dict(self, env):
+    def test_reset_returns_multi_node_observation(self, env):
         obs = env.reset()
-        assert isinstance(obs, dict)
-        assert len(obs) > 0
+        assert isinstance(obs, MultiNodeObservation)
+        assert len(obs.nodes) > 0
 
     def test_reset_obs_are_accordis_observations(self, env):
         obs = env.reset()
-        for nid, o in obs.items():
+        for nid, o in obs.nodes.items():
             assert isinstance(o, AccordisObservation)
 
     def test_reset_state_is_initialised(self, env):
         env.reset()
         state = env.state
-        assert state is not None
         assert state.step == 0
+        assert state.episode_id != ""
 
     def test_reset_with_custom_params(self, env):
         obs = env.reset(
@@ -42,7 +44,7 @@ class TestReset:
             curriculum_level=3,
             max_steps=300,
         )
-        assert len(obs) == 5  # 7 - 2 honest nodes
+        assert len(obs.nodes) == 5  # 7 - 2 honest nodes
 
     def test_reset_idempotent(self, env):
         env.reset()
@@ -52,18 +54,18 @@ class TestReset:
 
     def test_reset_obs_have_step_zero(self, env):
         obs = env.reset()
-        for nid, o in obs.items():
+        for nid, o in obs.nodes.items():
             assert o.step == 0
 
     def test_reset_no_byzantine(self, env):
         obs = env.reset(n_nodes=4, f_byzantine=0)
-        assert len(obs) == 4
+        assert len(obs.nodes) == 4
 
 
 class TestStep:
     def _make_actions(self, env, obs):
         """Create default actions for all honest nodes."""
-        return {
+        return MultiNodeAction(nodes={
             nid: AccordisAction(
                 node_id=nid,
                 view_timeout_ms=2000,
@@ -72,29 +74,27 @@ class TestStep:
                 equivocation_threshold=5,
                 vote_aggregation_timeout_ms=500,
             )
-            for nid in obs.keys()
-        }
+            for nid in obs.nodes.keys()
+        })
 
-    def test_step_returns_tuple(self, env):
+    def test_step_returns_multi_node_observation(self, env):
         obs = env.reset()
         actions = self._make_actions(env, obs)
         result = env.step(actions)
-        assert isinstance(result, tuple)
-        assert len(result) == 4
+        assert isinstance(result, MultiNodeObservation)
 
     def test_step_obs_are_observations(self, env):
         obs = env.reset()
         actions = self._make_actions(env, obs)
-        new_obs, rewards, done, info = env.step(actions)
-        for nid, o in new_obs.items():
+        result = env.step(actions)
+        for nid, o in result.nodes.items():
             assert isinstance(o, AccordisObservation)
 
-    def test_step_rewards_are_floats(self, env):
+    def test_step_reward_is_float(self, env):
         obs = env.reset()
         actions = self._make_actions(env, obs)
-        new_obs, rewards, done, info = env.step(actions)
-        for nid, r in rewards.items():
-            assert isinstance(r, float)
+        result = env.step(actions)
+        assert isinstance(result.reward, float)
 
     def test_step_increments_state(self, env):
         obs = env.reset()
@@ -105,44 +105,45 @@ class TestStep:
     def test_step_info_has_required_keys(self, env):
         obs = env.reset()
         actions = self._make_actions(env, obs)
-        _, _, _, info = env.step(actions)
-        assert "step" in info
-        assert "liveness_rate" in info
-        assert "agreement_ok" in info
-        assert "validity_ok" in info
+        result = env.step(actions)
+        assert "step" in result.metadata
+        assert "liveness_rate" in result.metadata
+        assert "agreement_ok" in result.metadata
+        assert "validity_ok" in result.metadata
 
     def test_step_done_at_max_steps(self, env):
         obs = env.reset(max_steps=3)
         actions = self._make_actions(env, obs)
-        done = False
+        result = None
         for _ in range(3):
-            obs, rewards, done, info = env.step(actions)
-            actions = self._make_actions(env, obs)
-        assert done is True
+            result = env.step(actions)
+            actions = self._make_actions(env, result)
+        assert result.done is True
 
     def test_step_without_reset_raises(self):
         adapter = SimulatedConsensusAdapter(seed=42)
         env = AccordisEnvironment(adapter=adapter)
-        actions = {"node_0": AccordisAction(
+        action = MultiNodeAction(nodes={"node_0": AccordisAction(
             node_id="node_0",
             view_timeout_ms=2000,
             pipeline_depth=2,
             replication_batch_size=64,
             equivocation_threshold=5,
             vote_aggregation_timeout_ms=500,
-        )}
+        )})
         with pytest.raises(RuntimeError):
-            env.step(actions)
+            env.step(action)
 
     def test_multiple_steps(self, env):
         obs = env.reset(max_steps=10)
         actions = self._make_actions(env, obs)
+        result = None
         for i in range(10):
-            obs, rewards, done, info = env.step(actions)
-            actions = self._make_actions(env, obs)
-            if done:
+            result = env.step(actions)
+            actions = self._make_actions(env, result)
+            if result.done:
                 break
-        assert done is True
+        assert result.done is True
 
 
 class TestClampAction:

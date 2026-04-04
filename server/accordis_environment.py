@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import uuid
 from copy import deepcopy
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from openenv.core.env_server.interfaces import Environment
-from openenv.core.env_server.types import State
 
 from accordis.models import (
     AccordisAction,
@@ -28,6 +27,7 @@ from accordis.models import (
     LeaderRotation,
     LivenessResult,
     MultiNodeAction,
+    MultiNodeObservation,
     NodeID,
     NodeRole,
     NodeState,
@@ -41,6 +41,7 @@ from accordis.server.adversary.bfa import ByzantineFailureAgent
 from accordis.server.oracle.verifier import CorrectnessOracle
 from accordis.server.rewards.reward_calculator import RewardCalculator
 from accordis.server.curriculum.manager import CurriculumManager
+from accordis.server.adapters import create_adapter
 
 
 class AccordisEnvironment(Environment):
@@ -56,15 +57,15 @@ class AccordisEnvironment(Environment):
     DEFAULT_CURRICULUM  = 1
     DEFAULT_BFA_SEED    = 42
 
-    def __init__(self, adapter: BaseConsensusAdapter) -> None:
-        self._adapter    = adapter
+    def __init__(self, adapter: Optional[BaseConsensusAdapter] = None) -> None:
+        self._adapter    = adapter if adapter is not None else create_adapter()
         self._bfa        = ByzantineFailureAgent()
         self._oracle     = CorrectnessOracle()
         self._calculator = RewardCalculator()
         self._curriculum = CurriculumManager()
         self._transform  = AccordisTransform()
 
-        self._state: Optional[AccordisState] = None
+        self._state: AccordisState = AccordisState(episode_id=str(uuid.uuid4()), step=0)
         self._episode_rewards: List[AccordisReward] = []
         self._episode_log: Optional[EpisodeLog] = None
         self._max_steps: int = self.DEFAULT_MAX_STEPS
@@ -79,6 +80,8 @@ class AccordisEnvironment(Environment):
 
     def reset(
         self,
+        seed: Optional[int] = None,
+        episode_id: Optional[str] = None,
         *,
         n_nodes: int = DEFAULT_N_NODES,
         f_byzantine: int = DEFAULT_F_BYZANTINE,
@@ -86,8 +89,7 @@ class AccordisEnvironment(Environment):
         curriculum_level: Optional[int] = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         bfa_strategy_seed: int = DEFAULT_BFA_SEED,
-        episode_id: Optional[str] = None,
-    ) -> Dict[NodeID, AccordisObservation]:
+    ) -> MultiNodeObservation:
         """Start a new episode and return per-node initial observations.
 
         reset() Internal Sequence:
@@ -100,8 +102,10 @@ class AccordisEnvironment(Environment):
           7. Initialise AccordisState, episode_txn_pool, episode_rewards = []
           8. Return obs dict
         """
+        self._reset_rubric()
+
         self._max_steps = max_steps
-        self._bfa_seed  = bfa_strategy_seed
+        self._bfa_seed  = seed if seed is not None else bfa_strategy_seed
 
         level = curriculum_level if curriculum_level is not None else self._curriculum.level
 
@@ -186,12 +190,14 @@ class AccordisEnvironment(Environment):
         )
 
         # Step 8
-        return obs
+        return self._apply_transform(obs)
 
     def step(
         self,
-        actions: MultiNodeAction,
-    ) -> Tuple[Dict[NodeID, AccordisObservation], Dict[NodeID, float], bool, dict]:
+        action: MultiNodeAction,
+        timeout_s: Optional[float] = None,
+        **kwargs: Any,
+    ) -> MultiNodeObservation:
         """Advance the environment by one synchronous consensus round."""
         if self._state is None:
             raise RuntimeError("reset() must be called before step()")
@@ -203,9 +209,9 @@ class AccordisEnvironment(Environment):
 
         # Step 1+2: Clamp and apply configs
         clamped_configs: Dict[NodeID, BFTConfig] = {}
-        for nid, action in actions.items():
+        for nid, node_action in action.nodes.items():
             if nid in honest_nodes:
-                clamped = self._clamp_action(action)
+                clamped = self._clamp_action(node_action)
                 config = BFTConfig(
                     view_timeout_ms=clamped.view_timeout_ms,
                     pipeline_depth=clamped.pipeline_depth,
@@ -315,8 +321,6 @@ class AccordisEnvironment(Environment):
             self._episode_log.steps.append(deepcopy(self._state))
             self._episode_log.rewards.append(reward)
 
-        scalar_rewards = {nid: reward.total for nid in honest_nodes}
-
         info = {
             "step":              step,
             "liveness_rate":     liveness.liveness_rate,
@@ -327,10 +331,22 @@ class AccordisEnvironment(Environment):
             "reward_breakdown":  reward.model_dump(),
         }
 
-        return obs, scalar_rewards, done, info
+        for nid in honest_nodes:
+            if nid in obs:
+                obs[nid].reward = reward.total
+                obs[nid].done = done
+
+        rubric_reward = self._apply_rubric(action, obs)
+        result = self._apply_transform(obs)
+        result.reward = rubric_reward
+        result.done = done
+        result.metadata = info
+        return result
 
     @property
     def state(self) -> AccordisState:
+        if self._state is None:
+            raise RuntimeError("reset() must be called before step()")
         return self._state
 
     # ── Internal Helpers ──────────────────────────────────────────────────────

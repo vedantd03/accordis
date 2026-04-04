@@ -19,7 +19,7 @@ except Exception as e:  # pragma: no cover
         "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
     ) from e
 
-from accordis.models import AccordisObservation, AccordisAction
+from accordis.models import MultiNodeAction, MultiNodeObservation
 from accordis.server.accordis_environment import AccordisEnvironment
 from accordis.server.adapters import create_adapter
 
@@ -33,8 +33,8 @@ def _make_env() -> AccordisEnvironment:
 # Create the app with web interface and README integration
 app = create_app(
     _make_env,
-    AccordisObservation,
-    AccordisAction,
+    MultiNodeAction,
+    MultiNodeObservation,
     env_name="accordis",
     max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions
 )

@@ -5,6 +5,7 @@ from accordis.models import (
     AccordisAction,
     AccordisObservation,
     AccordisRubric,
+    MultiNodeObservation,
     AccordisReward,
     AccordisState,
     AccordisTransform,
@@ -168,15 +169,20 @@ class TestAccordisTransform:
         obs = t.transform(raw, "node_0", step=0, current_config=STATIC_BASELINE_CONFIG)
         assert obs.current_role == NodeRole.REPLICA
 
-    def test_call_passes_through(self):
+    def test_call_wraps_into_multi_node_observation(self):
         t = AccordisTransform()
-        obs = AccordisObservation(
-            node_id="node_0",
-            current_role=NodeRole.REPLICA,
-            current_view=0,
-        )
-        result = t(obs)
-        assert result is obs
+        raw = {
+            "role": "replica", "current_view": 0, "phase_latency_p50": {},
+            "phase_latency_p99": {}, "qc_miss_streak": 0, "view_changes_last_50": 0,
+            "equivocation_counts": {}, "inter_message_variance": {},
+            "suspected_peers": {}, "committed_tps": 0.0,
+            "pending_count": 0, "pipeline_utilisation": 0.0,
+        }
+        node_obs = t.transform(raw, "node_0", step=0, current_config=STATIC_BASELINE_CONFIG)
+        obs_dict = {"node_0": node_obs}
+        result = t(obs_dict)
+        assert isinstance(result, MultiNodeObservation)
+        assert result.nodes == obs_dict
 
 
 class TestAccordisRubric:

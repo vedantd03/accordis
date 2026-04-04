@@ -9,9 +9,13 @@
 from accordis.models import (
     AccordisAction,
     AccordisObservation,
+    MultiNodeAction,
+    MultiNodeObservation,
 )
 
 __all__ = [
     "AccordisAction",
     "AccordisObservation",
+    "MultiNodeAction",
+    "MultiNodeObservation",
 ]

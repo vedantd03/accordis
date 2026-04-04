@@ -16,7 +16,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Dict, List, Literal, Optional, Tuple, Any
 
-from openenv.core.env_server.types import Action, Observation
+from openenv.core.env_server.types import Action, Observation, State
 from openenv.core.env_server.interfaces import Transform
 from openenv.core.rubrics import Rubric
 from pydantic import BaseModel, Field
@@ -104,6 +104,11 @@ class AccordisObservation(Observation):
     step:           int = 0
 
 
+class MultiNodeObservation(Observation):
+    """Aggregated per-honest-node observation returned by reset() and step()."""
+    nodes: Dict[NodeID, AccordisObservation]
+
+
 class AccordisAction(Action):
     """
     Configuration assignment for a single honest node per step.
@@ -120,7 +125,9 @@ class AccordisAction(Action):
     clear_suspicion:             Optional[NodeID] = None
 
 
-MultiNodeAction = Dict[NodeID, AccordisAction]
+class MultiNodeAction(Action):
+    """Per-round joint action across all honest nodes."""
+    nodes: Dict[NodeID, AccordisAction]
 
 
 class AccordisReward(BaseModel):
@@ -165,7 +172,7 @@ class ProposalRegistry(BaseModel):
     honest_proposals: Dict[str, Transaction] = Field(default_factory=dict)
 
 
-class AccordisState(BaseModel):
+class AccordisState(State):
     """Full true state — accessible to oracle and environment only. Never exposed to agent."""
     episode_id:        str
     step:              int = 0
@@ -258,8 +265,8 @@ class AccordisTransform(Transform):
             step=step,
         )
 
-    def __call__(self, observation: AccordisObservation) -> AccordisObservation:
-        return observation
+    def __call__(self, observation: Dict[NodeID, "AccordisObservation"]) -> MultiNodeObservation:
+        return MultiNodeObservation(nodes=observation)
 
 
 class AccordisRubric(Rubric):
@@ -285,7 +292,13 @@ class AccordisRubric(Rubric):
         self.max_possible_reward = max_possible_reward
         self.min_possible_reward = min_possible_reward
 
-    def forward(self, action: Any, observation: Any) -> float:
+    def forward(self, action: MultiNodeAction, observation: Any) -> float:
+        if isinstance(observation, dict):
+            for obs in observation.values():
+                if isinstance(getattr(obs, "reward", None), (int, float)):
+                    return float(obs.reward)
+        elif isinstance(observation, MultiNodeObservation) and isinstance(observation.reward, (int, float)):
+            return float(observation.reward)
         return 0.0
 
     def grade(
