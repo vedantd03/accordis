@@ -4,7 +4,19 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any
+
+from dotenv import find_dotenv, load_dotenv
+
+
+# _ENV_PATH = find_dotenv(filename=".env", usecwd=True)
+# if not _ENV_PATH:
+#     candidate = Path(__file__).resolve().with_name(".env")
+#     if candidate.exists():
+#         _ENV_PATH = str(candidate)
+# if _ENV_PATH:
+#     load_dotenv(_ENV_PATH, override=False)
 
 
 class BaseLLMClient(ABC):
@@ -14,11 +26,12 @@ class BaseLLMClient(ABC):
     def complete(self, system: str, user: str) -> str:
         """Send a completion request and return the response text."""
 
+    def close(self) -> None:
+        """Release provider resources when a client supports explicit cleanup."""
+
 
 class OpenAIClient(BaseLLMClient):
     """OpenAI chat-completion client."""
-
-    _MODEL = "gpt-4o"
 
     def __init__(self) -> None:
         from openai import OpenAI
@@ -39,6 +52,11 @@ class OpenAIClient(BaseLLMClient):
             ],
         )
         return (resp.choices[0].message.content or "").strip()
+
+    def close(self) -> None:
+        close = getattr(self._client, "close", None)
+        if callable(close):
+            close()
 
 
 class GeminiClient(BaseLLMClient):
@@ -71,6 +89,17 @@ class GeminiClient(BaseLLMClient):
         parts = getattr(getattr(candidates[0], "content", None), "parts", None) or []
         texts = [part.text for part in parts if getattr(part, "text", None)]
         return "".join(texts)
+
+    def close(self) -> None:
+        close = getattr(self._client, "close", None)
+        if not callable(close):
+            return
+
+        try:
+            close()
+        except AttributeError as exc:
+            if "_async_httpx_client" not in str(exc):
+                raise
 
 
 class LLMClientFactory:

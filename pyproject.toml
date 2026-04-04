@@ -15,6 +15,7 @@ description = "Accordis environment for OpenEnv"
 requires-python = ">=3.10"
 dependencies = [
     "google-genai>=1.70.0",
+    "python-dotenv>=1.0.1",
     # Core OpenEnv runtime (provides FastAPI server + HTTP client types)
     # install from github
     # "openenv-core[core] @ git+https://github.com/meta-pytorch/OpenEnv.git",

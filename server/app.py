@@ -22,12 +22,13 @@ except Exception as e:  # pragma: no cover
 from dotenv import load_dotenv
 load_dotenv()
 
-from server.utils.logger import setup_logger
+from accordis.server.utils.logger import setup_logger
 setup_logger()
 
 from accordis.models import MultiNodeAction, MultiNodeObservation
 from accordis.server.accordis_environment import AccordisEnvironment
 from accordis.server.adapters import create_adapter
+from accordis.server.router import setup_router
 
 
 def _make_env() -> AccordisEnvironment:
@@ -44,6 +45,9 @@ app = create_app(
     env_name="accordis",
     max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions
 )
+
+# Mount the v1 API router (e.g. /baseline)
+app.include_router(setup_router())
 
 
 def main(host: str = "0.0.0.0", port: int = 8000):
