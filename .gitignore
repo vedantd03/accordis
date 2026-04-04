@@ -179,4 +179,7 @@ pyrightconfig.json
 # Outputs - Logs and Evals
 outputs/
 
+# .mcp.json
+.mcp.json
+
 # End of https://www.toptal.com/developers/gitignore/api/python
