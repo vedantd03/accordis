@@ -4,14 +4,14 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
-from accordis.server.baseline.baseline_helper import run_baseline
+from accordis.server.utils.baseline_helper import run_baseline
 
 router = APIRouter(prefix="/baseline", tags=["baseline"])
 
 
 class BaselineRequest(BaseModel):
     provider: Optional[str] = Field(
-        default="static",
+        default="openai",
         description="Inference provider. Options: 'static' (no LLM), 'openai', 'gemini'.",
         examples=["static", "openai", "gemini"],
     )
@@ -24,9 +24,9 @@ class BaselineRequest(BaseModel):
         examples=[["easy"], ["easy", "medium", "hard"]],
     )
     model: Optional[str] = Field(
-        default=None,
+        default="Qwen/Qwen2.5-72B-Instruct",
         description="LLM model name. Required when provider is 'openai' or 'gemini'.",
-        examples=["gpt-4o", "gemini-1.5-pro"],
+        examples=["gpt-5.4", "gemini-3.1-flash-lite-preview", "Qwen/Qwen2.5-72B-Instruct"],
     )
 
     model_config = {
@@ -63,9 +63,9 @@ async def baseline(baseline_request: Optional[BaselineRequest] = None):
 
     try:
         result = await run_baseline(
-            tasks=baseline_request.tasks,
             provider=baseline_request.provider,
             model=baseline_request.model,
+            tasks=baseline_request.tasks,
         )
         return JSONResponse(content=result, status_code=200)
     except Exception as e:

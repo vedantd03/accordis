@@ -69,7 +69,9 @@ def main(host: str = "0.0.0.0", port: int = 8000):
     """
     import uvicorn
 
-    uvicorn.run(app, host=host, port=port)
+    # Keep the application's logging configuration instead of letting uvicorn
+    # install its own handlers/config on startup.
+    uvicorn.run(app, host=host, port=port, log_config=None)
 
 
 if __name__ == "__main__":

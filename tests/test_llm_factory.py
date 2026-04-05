@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from pathlib import Path
 import sys
@@ -26,7 +27,7 @@ def test_openai_client_complete_uses_chat_completions(monkeypatch):
     calls = {}
 
     class FakeCompletions:
-        def create(self, **kwargs):
+        async def create(self, **kwargs):
             calls.update(kwargs)
             return types.SimpleNamespace(
                 choices=[
@@ -36,25 +37,24 @@ def test_openai_client_complete_uses_chat_completions(monkeypatch):
                 ]
             )
 
-    class FakeOpenAI:
+    class FakeAsyncOpenAI:
         def __init__(self, *, base_url, api_key):
             calls["base_url"] = base_url
             calls["api_key"] = api_key
             self.chat = types.SimpleNamespace(completions=FakeCompletions())
             self.closed = False
 
-        def close(self):
+        async def close(self):
             self.closed = True
 
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
-    monkeypatch.setenv("MODEL_NAME", "gpt-4o")
+    monkeypatch.setenv("API_KEY", "openai-key")
     monkeypatch.setenv("API_BASE_URL", "https://api.openai.com/v1")
-    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=FakeOpenAI))
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(AsyncOpenAI=FakeAsyncOpenAI))
 
     llm_factory = _reload_llm_factory()
-    client = llm_factory.OpenAIClient()
+    client = llm_factory.OpenAIClient(model="gpt-4o")
 
-    assert client.complete("sys prompt", "user prompt") == "openai reply"
+    assert asyncio.run(client.complete("sys prompt", "user prompt")) == "openai reply"
     assert calls["api_key"] == "openai-key"
     assert calls["base_url"] == "https://api.openai.com/v1"
     assert calls["model"] == "gpt-4o"
@@ -62,24 +62,32 @@ def test_openai_client_complete_uses_chat_completions(monkeypatch):
         {"role": "system", "content": "sys prompt"},
         {"role": "user", "content": "user prompt"},
     ]
-    client.close()
+    asyncio.run(client.close())
 
 
 def test_gemini_client_complete_uses_generate_content(monkeypatch):
     calls = {}
 
     class FakeModels:
-        def generate_content(self, **kwargs):
+        async def generate_content(self, **kwargs):
             calls.update(kwargs)
             return types.SimpleNamespace(text="  gemini reply  ")
+
+    class FakeAsyncGenAIClient:
+        def __init__(self):
+            self.models = FakeModels()
+
+        async def close(self):
+            return None
 
     class FakeGenAIClient:
         def __init__(self, *, api_key):
             calls["api_key"] = api_key
-            self.models = FakeModels()
+            self.models = types.SimpleNamespace()
+            self.aio = FakeAsyncGenAIClient()
             self.closed = False
 
-        def close(self):
+        async def close(self):
             self.closed = True
 
     google_module = types.ModuleType("google")
@@ -87,26 +95,24 @@ def test_gemini_client_complete_uses_generate_content(monkeypatch):
     genai_module.Client = FakeGenAIClient
     google_module.genai = genai_module
 
-    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
-    monkeypatch.setenv("MODEL_NAME", "gemini-2.0-flash")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("API_KEY", "gemini-key")
     monkeypatch.setitem(sys.modules, "google", google_module)
     monkeypatch.setitem(sys.modules, "google.genai", genai_module)
 
     llm_factory = _reload_llm_factory()
-    client = llm_factory.GeminiClient()
+    client = llm_factory.GeminiClient(model="gemini-2.0-flash")
 
-    assert client.complete("sys prompt", "user prompt") == "gemini reply"
+    assert asyncio.run(client.complete("sys prompt", "user prompt")) == "gemini reply"
     assert calls["api_key"] == "gemini-key"
     assert calls["model"] == "gemini-2.0-flash"
     assert calls["contents"] == "user prompt"
     assert calls["config"] == {"system_instruction": "sys prompt"}
-    client.close()
+    asyncio.run(client.close())
 
 
 def test_gemini_client_extracts_text_from_parts(monkeypatch):
     class FakeModels:
-        def generate_content(self, **kwargs):
+        async def generate_content(self, **kwargs):
             return types.SimpleNamespace(
                 text=None,
                 candidates=[
@@ -122,24 +128,28 @@ def test_gemini_client_extracts_text_from_parts(monkeypatch):
                 ],
             )
 
+    class FakeAsyncGenAIClient:
+        def __init__(self):
+            self.models = FakeModels()
+
     class FakeGenAIClient:
         def __init__(self, *, api_key):
-            self.models = FakeModels()
+            self.models = types.SimpleNamespace()
+            self.aio = FakeAsyncGenAIClient()
 
     google_module = types.ModuleType("google")
     genai_module = types.ModuleType("google.genai")
     genai_module.Client = FakeGenAIClient
     google_module.genai = genai_module
 
-    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
-    monkeypatch.setenv("MODEL_NAME", "gemini-2.0-flash")
+    monkeypatch.setenv("API_KEY", "gemini-key")
     monkeypatch.setitem(sys.modules, "google", google_module)
     monkeypatch.setitem(sys.modules, "google.genai", genai_module)
 
     llm_factory = _reload_llm_factory()
-    client = llm_factory.GeminiClient()
+    client = llm_factory.GeminiClient(model="gemini-2.0-flash")
 
-    assert client.complete("sys prompt", "user prompt") == '{"node_0": {}}'
+    assert asyncio.run(client.complete("sys prompt", "user prompt")) == '{"node_0": {}}'
 
 
 def test_factory_uses_provider_to_select_openai(monkeypatch):
@@ -159,24 +169,27 @@ def test_factory_uses_provider_to_select_openai(monkeypatch):
     genai_module.Client = FakeGenAIClient
     google_module.genai = genai_module
 
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
-    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
-    monkeypatch.setenv("PROVIDER", "openai")
-    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=FakeOpenAI))
+    monkeypatch.setenv("API_KEY", "openai-key")
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(AsyncOpenAI=FakeOpenAI))
     monkeypatch.setitem(sys.modules, "google", google_module)
     monkeypatch.setitem(sys.modules, "google.genai", genai_module)
 
     llm_factory = _reload_llm_factory()
 
-    assert isinstance(llm_factory.LLMClientFactory.create(), llm_factory.OpenAIClient)
+    assert isinstance(llm_factory.LLMClientFactory.create("openai", "gpt-4o"), llm_factory.OpenAIClient)
 
 
 def test_gemini_client_close_swallows_missing_async_httpx_client(monkeypatch):
+    class FakeAsyncGenAIClient:
+        async def close(self):
+            raise AttributeError("'BaseApiClient' object has no attribute '_async_httpx_client'")
+
     class FakeGenAIClient:
         def __init__(self, *, api_key):
             self.models = None
+            self.aio = FakeAsyncGenAIClient()
 
-        def close(self):
+        async def close(self):
             raise AttributeError("'BaseApiClient' object has no attribute '_async_httpx_client'")
 
     google_module = types.ModuleType("google")
@@ -184,11 +197,11 @@ def test_gemini_client_close_swallows_missing_async_httpx_client(monkeypatch):
     genai_module.Client = FakeGenAIClient
     google_module.genai = genai_module
 
-    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    monkeypatch.setenv("API_KEY", "gemini-key")
     monkeypatch.setitem(sys.modules, "google", google_module)
     monkeypatch.setitem(sys.modules, "google.genai", genai_module)
 
     llm_factory = _reload_llm_factory()
-    client = llm_factory.GeminiClient()
+    client = llm_factory.GeminiClient(model="gemini-2.0-flash")
 
-    client.close()
+    asyncio.run(client.close())
