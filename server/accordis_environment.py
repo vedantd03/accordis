@@ -89,6 +89,7 @@ class AccordisEnvironment(Environment):
         curriculum_level: Optional[int] = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         bfa_strategy_seed: int = DEFAULT_BFA_SEED,
+        pool_size: int = 1000,
     ) -> MultiNodeObservation:
         """Start a new episode and return per-node initial observations.
 
@@ -116,7 +117,7 @@ class AccordisEnvironment(Environment):
         self._adapter.configure_network(level, [])
 
         # Step 3
-        self._adapter.start_cluster(n_nodes, f_byzantine, leader_rotation)
+        self._adapter.start_cluster(n_nodes, f_byzantine, leader_rotation, pool_size)
         honest_nodes    = self._adapter.get_honest_nodes()
         byzantine_nodes = self._adapter.get_byzantine_nodes()
 
@@ -162,7 +163,7 @@ class AccordisEnvironment(Environment):
                 config=STATIC_BASELINE_CONFIG,
             )
 
-        txn_pool = [Transaction(id=f"tx_{i}", submitted_at=0) for i in range(1000)]
+        txn_pool = [Transaction(id=f"tx_{i}", submitted_at=0) for i in range(pool_size)]
         registry = ProposalRegistry(
             honest_proposals={tx.id: tx for tx in txn_pool}
         )
@@ -202,7 +203,7 @@ class AccordisEnvironment(Environment):
         if self._state is None:
             raise RuntimeError("reset() must be called before step()")
 
-        prev_state = deepcopy(self._state)
+        prev_state = self._snapshot_state(self._state)
         step = self._state.step + 1
         honest_nodes    = self._adapter.get_honest_nodes()
         byzantine_nodes = self._adapter.get_byzantine_nodes()
@@ -281,7 +282,26 @@ class AccordisEnvironment(Environment):
         liveness = self._oracle.check_liveness(self._state)
 
         # Step 11: Done check
-        done = (step >= self._max_steps) or (liveness.pending_count == 0)
+        # Termination reasons (in priority order):
+        #   pool_drained      — all transactions committed (success)
+        #   agreement_violated — two honest nodes committed conflicting blocks (irreversible)
+        #   validity_violated  — committed tx not in honest_proposals (irreversible)
+        #   max_steps          — budget exhausted
+        if liveness.pending_count == 0:
+            _termination_reason = "pool_drained"
+        elif verifier_results.agreement_violated:
+            _termination_reason = "agreement_violated"
+        elif verifier_results.validity_violated:
+            _termination_reason = "validity_violated"
+        else:
+            _termination_reason = "max_steps"
+
+        done = (
+            (step >= self._max_steps)
+            or (liveness.pending_count == 0)
+            or verifier_results.agreement_violated
+            or verifier_results.validity_violated
+        )
 
         # Step 10+12: Reward computation
         if done:
@@ -290,7 +310,7 @@ class AccordisEnvironment(Environment):
                 self._curriculum.advance()
 
             if self._episode_log:
-                self._episode_log.steps.append(deepcopy(self._state))
+                self._episode_log.steps.append(self._snapshot_state(self._state))
                 baseline = self._oracle.compute_baseline_comparison(
                     episode_log=self._episode_log,
                     static_config=STATIC_BASELINE_CONFIG,
@@ -319,17 +339,18 @@ class AccordisEnvironment(Environment):
 
         self._episode_rewards.append(reward)
         if self._episode_log and not done:
-            self._episode_log.steps.append(deepcopy(self._state))
+            self._episode_log.steps.append(self._snapshot_state(self._state))
             self._episode_log.rewards.append(reward)
 
         info = {
-            "step":              step,
-            "liveness_rate":     liveness.liveness_rate,
-            "view_change_count": self._state.view_change_count,
-            "bfa_strategy":      strategy.value,
-            "agreement_ok":      verifier_results.agreement.passed,
-            "validity_ok":       verifier_results.validity.passed,
-            "reward_breakdown":  reward.model_dump(),
+            "step":               step,
+            "liveness_rate":      liveness.liveness_rate,
+            "view_change_count":  self._state.view_change_count,
+            "bfa_strategy":       strategy.value,
+            "agreement_ok":       verifier_results.agreement.passed,
+            "validity_ok":        verifier_results.validity.passed,
+            "reward_breakdown":   reward.model_dump(),
+            "termination_reason": _termination_reason if done else None,
         }
 
         for nid in honest_nodes:
@@ -385,6 +406,26 @@ class AccordisEnvironment(Environment):
             vote_aggregation_timeout_ms=vote_aggregation_timeout_ms,
             suspect_node=action.suspect_node,
             clear_suspicion=action.clear_suspicion,
+        )
+
+    def _snapshot_state(self, state: AccordisState) -> AccordisState:
+        """Copy mutable per-step state without duplicating the episode transaction pool."""
+        return AccordisState(
+            episode_id=state.episode_id,
+            step=state.step,
+            curriculum_level=state.curriculum_level,
+            n_nodes=state.n_nodes,
+            f_byzantine=state.f_byzantine,
+            leader_rotation=state.leader_rotation,
+            node_states={
+                nid: node_state.model_copy(deep=True)
+                for nid, node_state in state.node_states.items()
+            },
+            view_change_count=state.view_change_count,
+            bfa_strategy=state.bfa_strategy,
+            proposal_registry=state.proposal_registry,
+            episode_txn_pool=state.episode_txn_pool,
+            finalized_txn_count=state.finalized_txn_count,
         )
 
     def _build_observation(self) -> AccordisObservation:

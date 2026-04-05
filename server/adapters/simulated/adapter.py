@@ -54,6 +54,7 @@ class SimulatedConsensusAdapter(BaseConsensusAdapter):
         n_nodes: int,
         f_byzantine: int,
         leader_rotation: LeaderRotation,
+        pool_size: int = 1000,
     ) -> List[NodeID]:
         """Start a fresh cluster. Returns node IDs: honest first, Byzantine last."""
         self._is_running = True
@@ -62,12 +63,11 @@ class SimulatedConsensusAdapter(BaseConsensusAdapter):
         self._network_sim = NetworkSimulator(seed=self._seed)
 
         # Generate transaction pool
-        self._txn_counter = 0
         self._episode_txn_pool = [
             Transaction(id=f"tx_{i}", submitted_at=0)
-            for i in range(1000)
+            for i in range(pool_size)
         ]
-        self._txn_counter = 1000
+        self._txn_counter = pool_size
 
         # Create nodes
         honest_count = n_nodes - f_byzantine

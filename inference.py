@@ -39,20 +39,46 @@ STDOUT FORMAT
 import json
 import os
 import asyncio
+import argparse
 from dotenv import load_dotenv
-load_dotenv()
 
 from accordis.server.utils.baseline_helper import run_baseline
 from accordis.server.utils.logger import logger
 
-async def inference():
+async def inference(provider: str, model: str, tasks: list[str]) -> dict:
     baseline_result = await run_baseline(
-        provider=os.getenv("PROVIDER"),
-        model=os.getenv("MODEL_NAME"),
-        tasks=os.getenv("ACCORDIS_TASKS").split(",") if os.getenv("ACCORDIS_TASKS") else ["easy", "medium", "hard"],
+        provider=provider,
+        model=model,
+        tasks=tasks
     )
     logger.info(f"Baseline result: {json.dumps(baseline_result, indent=2)}")
     return baseline_result
 
 if __name__ == "__main__":
-    asyncio.run(inference())
+    load_dotenv()
+    parser = argparse.ArgumentParser(description="Run Accordis baseline evaluation")
+    parser.add_argument(
+        "--provider", default=os.getenv("PROVIDER", "openai"),
+        choices=["static", "openai", "gemini"],
+        help="LLM provider (default: openai)"
+    )
+    parser.add_argument(
+        "--model", default=None,
+        help="LLM model to use (default: provider-specific default)"
+    )
+    parser.add_argument(
+        "--tasks", nargs="*", default=os.getenv("ACCORDIS_TASKS", "easy,medium,hard").split(","),
+        help="Difficulty levels to evaluate (default: all(easy,medium,hard). Ignored when --scenario is set."
+    )
+    args = parser.parse_args()
+    if args.provider in ["openai", "gemini"] and args.model is None:
+        if args.provider == "openai":
+            args.model = os.getenv("MODEL", "Qwen/Qwen2.5-72B-Instruct")
+        elif args.provider == "gemini":
+            args.model = os.getenv("MODEL", "gemini-3.1-flash-lite-preview")
+    
+    asyncio.run(inference(
+        provider=args.provider,
+        model=args.model,
+        tasks=args.tasks
+    ))
