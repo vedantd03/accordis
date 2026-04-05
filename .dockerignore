@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.venv
+.pytest_cache
+.vscode
+.agents
+.claude
+.codex
+.code-review-graph
+__pycache__/
+*.py[cod]
+*.log
+outputs/
+memory/
+tests/
+MEDIUM.log
