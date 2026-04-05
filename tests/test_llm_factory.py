@@ -13,7 +13,7 @@ def _reload_llm_factory():
     module_name = "_test_llm_factory"
     sys.modules.pop(module_name, None)
 
-    module_path = Path(__file__).resolve().parents[1] / "llm_factory.py"
+    module_path = Path(__file__).resolve().parents[1] / "server" / "utils" / "llm_factory.py"
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec is not None
@@ -95,7 +95,12 @@ def test_gemini_client_complete_uses_generate_content(monkeypatch):
     genai_module.Client = FakeGenAIClient
     google_module.genai = genai_module
 
-    monkeypatch.setenv("API_KEY", "gemini-key")
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY_1", "gemini-key-1")
+    monkeypatch.delenv("GEMINI_API_KEY_2", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY_3", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY_4", raising=False)
+    monkeypatch.delenv("GEMINI_KEY_4", raising=False)
     monkeypatch.setitem(sys.modules, "google", google_module)
     monkeypatch.setitem(sys.modules, "google.genai", genai_module)
 
@@ -103,10 +108,179 @@ def test_gemini_client_complete_uses_generate_content(monkeypatch):
     client = llm_factory.GeminiClient(model="gemini-2.0-flash")
 
     assert asyncio.run(client.complete("sys prompt", "user prompt")) == "gemini reply"
-    assert calls["api_key"] == "gemini-key"
+    assert calls["api_key"] == "gemini-key-1"
     assert calls["model"] == "gemini-2.0-flash"
     assert calls["contents"] == "user prompt"
     assert calls["config"] == {"system_instruction": "sys prompt"}
+    asyncio.run(client.close())
+
+
+def test_gemini_client_rotates_keys_every_15_requests(monkeypatch):
+    call_api_keys = []
+
+    class FakeModels:
+        def __init__(self, api_key):
+            self._api_key = api_key
+
+        async def generate_content(self, **kwargs):
+            call_api_keys.append(self._api_key)
+            return types.SimpleNamespace(text=f"reply-{self._api_key}")
+
+    class FakeAsyncGenAIClient:
+        def __init__(self, api_key):
+            self.models = FakeModels(api_key)
+
+        async def close(self):
+            return None
+
+    class FakeGenAIClient:
+        def __init__(self, *, api_key):
+            self.models = types.SimpleNamespace()
+            self.aio = FakeAsyncGenAIClient(api_key)
+
+        async def close(self):
+            return None
+
+    google_module = types.ModuleType("google")
+    genai_module = types.ModuleType("google.genai")
+    genai_module.Client = FakeGenAIClient
+    google_module.genai = genai_module
+
+    monkeypatch.setenv("GEMINI_API_KEY_1", "key-1")
+    monkeypatch.setenv("GEMINI_API_KEY_2", "key-2")
+    monkeypatch.setenv("GEMINI_API_KEY_3", "key-3")
+    monkeypatch.delenv("GEMINI_API_KEY_4", raising=False)
+    monkeypatch.delenv("GEMINI_KEY_4", raising=False)
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.setitem(sys.modules, "google", google_module)
+    monkeypatch.setitem(sys.modules, "google.genai", genai_module)
+
+    llm_factory = _reload_llm_factory()
+    client = llm_factory.GeminiClient(model="gemini-2.0-flash")
+
+    for _ in range(45):
+        asyncio.run(client.complete("sys prompt", "user prompt"))
+
+    assert call_api_keys == (["key-1"] * 15) + (["key-2"] * 15) + (["key-3"] * 15)
+    asyncio.run(client.close())
+
+
+def test_gemini_client_discovers_additional_keys_automatically(monkeypatch):
+    call_api_keys = []
+
+    class FakeModels:
+        def __init__(self, api_key):
+            self._api_key = api_key
+
+        async def generate_content(self, **kwargs):
+            call_api_keys.append(self._api_key)
+            return types.SimpleNamespace(text=f"reply-{self._api_key}")
+
+    class FakeAsyncGenAIClient:
+        def __init__(self, api_key):
+            self.models = FakeModels(api_key)
+
+        async def close(self):
+            return None
+
+    class FakeGenAIClient:
+        def __init__(self, *, api_key):
+            self.models = types.SimpleNamespace()
+            self.aio = FakeAsyncGenAIClient(api_key)
+
+        async def close(self):
+            return None
+
+    google_module = types.ModuleType("google")
+    genai_module = types.ModuleType("google.genai")
+    genai_module.Client = FakeGenAIClient
+    google_module.genai = genai_module
+
+    monkeypatch.setenv("GEMINI_API_KEY_1", "key-1")
+    monkeypatch.setenv("GEMINI_API_KEY_2", "key-2")
+    monkeypatch.setenv("GEMINI_API_KEY_3", "key-3")
+    monkeypatch.setenv("GEMINI_KEY_4", "key-4")
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.setitem(sys.modules, "google", google_module)
+    monkeypatch.setitem(sys.modules, "google.genai", genai_module)
+
+    llm_factory = _reload_llm_factory()
+    client = llm_factory.GeminiClient(model="gemini-2.0-flash")
+
+    for _ in range(60):
+        asyncio.run(client.complete("sys prompt", "user prompt"))
+
+    assert call_api_keys == (
+        (["key-1"] * 15)
+        + (["key-2"] * 15)
+        + (["key-3"] * 15)
+        + (["key-4"] * 15)
+    )
+    asyncio.run(client.close())
+
+
+def test_gemini_client_waits_until_a_key_window_resets(monkeypatch):
+    call_api_keys = []
+    fake_now = 0.0
+    sleep_calls = []
+
+    class FakeModels:
+        def __init__(self, api_key):
+            self._api_key = api_key
+
+        async def generate_content(self, **kwargs):
+            call_api_keys.append(self._api_key)
+            return types.SimpleNamespace(text=f"reply-{self._api_key}")
+
+    class FakeAsyncGenAIClient:
+        def __init__(self, api_key):
+            self.models = FakeModels(api_key)
+
+        async def close(self):
+            return None
+
+    class FakeGenAIClient:
+        def __init__(self, *, api_key):
+            self.models = types.SimpleNamespace()
+            self.aio = FakeAsyncGenAIClient(api_key)
+
+        async def close(self):
+            return None
+
+    async def fake_sleep(delay):
+        nonlocal fake_now
+        sleep_calls.append(delay)
+        fake_now += delay
+
+    google_module = types.ModuleType("google")
+    genai_module = types.ModuleType("google.genai")
+    genai_module.Client = FakeGenAIClient
+    google_module.genai = genai_module
+
+    monkeypatch.setenv("GEMINI_API_KEY_1", "key-1")
+    monkeypatch.setenv("GEMINI_API_KEY_2", "key-2")
+    monkeypatch.setenv("GEMINI_API_KEY_3", "key-3")
+    monkeypatch.delenv("GEMINI_API_KEY_4", raising=False)
+    monkeypatch.delenv("GEMINI_KEY_4", raising=False)
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.setitem(sys.modules, "google", google_module)
+    monkeypatch.setitem(sys.modules, "google.genai", genai_module)
+
+    llm_factory = _reload_llm_factory()
+    monkeypatch.setattr(llm_factory.time, "monotonic", lambda: fake_now)
+    monkeypatch.setattr(llm_factory.asyncio, "sleep", fake_sleep)
+
+    client = llm_factory.GeminiClient(model="gemini-2.0-flash")
+
+    for _ in range(45):
+        asyncio.run(client.complete("sys prompt", "user prompt"))
+
+    assert sleep_calls == []
+
+    asyncio.run(client.complete("sys prompt", "user prompt"))
+
+    assert sleep_calls == [60.0]
+    assert call_api_keys[-1] == "key-1"
     asyncio.run(client.close())
 
 
@@ -142,7 +316,12 @@ def test_gemini_client_extracts_text_from_parts(monkeypatch):
     genai_module.Client = FakeGenAIClient
     google_module.genai = genai_module
 
-    monkeypatch.setenv("API_KEY", "gemini-key")
+    monkeypatch.setenv("GEMINI_API_KEY_1", "gemini-key")
+    monkeypatch.delenv("GEMINI_API_KEY_2", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY_3", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY_4", raising=False)
+    monkeypatch.delenv("GEMINI_KEY_4", raising=False)
+    monkeypatch.delenv("API_KEY", raising=False)
     monkeypatch.setitem(sys.modules, "google", google_module)
     monkeypatch.setitem(sys.modules, "google.genai", genai_module)
 
@@ -197,7 +376,12 @@ def test_gemini_client_close_swallows_missing_async_httpx_client(monkeypatch):
     genai_module.Client = FakeGenAIClient
     google_module.genai = genai_module
 
-    monkeypatch.setenv("API_KEY", "gemini-key")
+    monkeypatch.setenv("GEMINI_API_KEY_1", "gemini-key")
+    monkeypatch.delenv("GEMINI_API_KEY_2", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY_3", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY_4", raising=False)
+    monkeypatch.delenv("GEMINI_KEY_4", raising=False)
+    monkeypatch.delenv("API_KEY", raising=False)
     monkeypatch.setitem(sys.modules, "google", google_module)
     monkeypatch.setitem(sys.modules, "google.genai", genai_module)
 

@@ -24,10 +24,12 @@ class BaseConsensusAdapter(ABC):
         n_nodes: int,
         f_byzantine: int,
         leader_rotation: LeaderRotation,
+        pool_size: int = 1000,
     ) -> List[NodeID]:
         """Start a fresh cluster of n_nodes. Designate f_byzantine nodes as Byzantine.
         Return the ordered list of all node IDs (honest first, Byzantine last).
         Must be callable multiple times — each call fully replaces the prior cluster.
+        pool_size controls the number of transactions in the episode transaction pool.
         """
         ...
 

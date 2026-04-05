@@ -16,7 +16,7 @@ import json
 import textwrap
 from typing import Dict, Optional
 
-from accordis.llm_factory import BaseLLMClient, LLMClientFactory
+from accordis.server.utils.llm_factory import BaseLLMClient, LLMClientFactory
 from accordis.models import (
     AccordisAction,
     AccordisObservation,
