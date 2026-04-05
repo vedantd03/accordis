@@ -20,7 +20,7 @@ def create_adapter(adapter_type: Optional[str] = None, **kwargs) -> BaseConsensu
         A BaseConsensusAdapter instance ready to use.
     """
     if adapter_type is None:
-        adapter_type = os.environ.get("ACCORDIS_ADAPTER", "simulated")
+        adapter_type = os.getenv("ACCORDIS_ADAPTER", "simulated")
 
     adapter_type = adapter_type.lower()
 

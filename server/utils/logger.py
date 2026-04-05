@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+from pathlib import Path
 from logging.handlers import TimedRotatingFileHandler
 
 def setup_logger(name: str = None) -> logging.Logger:
@@ -12,10 +13,11 @@ def setup_logger(name: str = None) -> logging.Logger:
     if not getattr(root, '_custom_configured', False):
         root.setLevel(logging.DEBUG)
 
-        # Ensure logs directory exists
-        log_dir = os.path.join(os.getcwd(), 'outputs', 'logs')
-        os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, 'accordis.log')
+        # Resolve logs relative to the project root so uvicorn/script cwd does not matter.
+        project_root = Path(__file__).resolve().parents[2]
+        log_dir = project_root / "outputs" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "accordis.log"
         
         # Formatter
         formatter = logging.Formatter(
