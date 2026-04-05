@@ -45,5 +45,21 @@ server = "accordis.server.app:main"
 
 [tool.setuptools]
 include-package-data = true
-packages = ["accordis", "accordis.server"]
+packages = [
+    "accordis",
+    "accordis.server",
+    "accordis.server.adapters",
+    "accordis.server.adapters.simulated",
+    "accordis.server.adversary",
+    "accordis.server.api",
+    "accordis.server.api.v1",
+    "accordis.server.baseline",
+    "accordis.server.curriculum",
+    "accordis.server.grader",
+    "accordis.server.network",
+    "accordis.server.oracle",
+    "accordis.server.rewards",
+    "accordis.server.tasks",
+    "accordis.server.utils",
+]
 package-dir = { "accordis" = ".", "accordis.server" = "server" }

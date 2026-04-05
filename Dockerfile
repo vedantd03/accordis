@@ -57,16 +57,23 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Final runtime stage
 FROM ${BASE_IMAGE}
 
-WORKDIR /app
+WORKDIR /app/env
 
-# Copy the virtual environment from builder
-COPY --from=builder /app/env/.venv /app/.venv
+# Ensure runtime utilities exist for health checks.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
 
-# Copy the environment code
+# Copy the environment code and the in-project virtual environment created by uv sync.
 COPY --from=builder /app/env /app/env
 
+# Hugging Face Docker Spaces run the container as UID 1000.
+# Make the application tree writable so startup logging can create outputs/logs.
+RUN mkdir -p /app/env/outputs/logs && \
+    chown -R 1000:1000 /app
+
 # Set PATH to use the virtual environment
-ENV PATH="/app/.venv/bin:$PATH"
+ENV PATH="/app/env/.venv/bin:$PATH"
 
 # Set PYTHONPATH so imports work correctly
 ENV PYTHONPATH="/app/env:$PYTHONPATH"
@@ -74,10 +81,11 @@ ENV PYTHONPATH="/app/env:$PYTHONPATH"
 # Set ENABLE_WEB_INTERFACE to enable Web UI in the server (if applicable)
 ENV ENABLE_WEB_INTERFACE=true
 
+USER 1000
+
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Run the FastAPI server
-# The module path is constructed to work with the /app/env structure
-CMD ["sh", "-c", "cd /app/env && uvicorn server.app:app --host 0.0.0.0 --port 8000"]
+CMD ["uvicorn", "accordis.server.app:app", "--host", "0.0.0.0", "--port", "8000"]
