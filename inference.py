@@ -9,7 +9,7 @@ LLM selection (LLMClientFactory, priority order):
     GEMINI_API_KEY     → Google gemini-1.5-pro
 
 Optional:
-    ACCORDIS_TASK      Task difficulty: "easy" (default), "medium", "hard".
+    ACCORDIS_TASKS      Task difficulty: "easy" (default), "medium", "hard".
     ACCORDIS_MAX_STEPS Override maximum steps per episode (default from task).
 
 STDOUT FORMAT
@@ -49,7 +49,7 @@ async def inference():
     baseline_result = await run_baseline(
         provider=os.getenv("PROVIDER"),
         model=os.getenv("MODEL_NAME"),
-        tasks=[os.getenv("ACCORDIS_TASK")],
+        tasks=os.getenv("ACCORDIS_TASKS").split(",") if os.getenv("ACCORDIS_TASKS") else ["easy", "medium", "hard"],
     )
     logger.info(f"Baseline result: {json.dumps(baseline_result, indent=2)}")
     return baseline_result
