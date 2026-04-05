@@ -42,6 +42,7 @@ from accordis.server.oracle.verifier import CorrectnessOracle
 from accordis.server.rewards.reward_calculator import RewardCalculator
 from accordis.server.curriculum.manager import CurriculumManager
 from accordis.server.adapters import create_adapter
+from accordis.server.utils.logger import logger
 
 
 class AccordisEnvironment(Environment):
@@ -103,6 +104,7 @@ class AccordisEnvironment(Environment):
           7. Initialise AccordisState, episode_txn_pool, episode_rewards = []
           8. Return obs dict
         """
+        logger.info(f"RESET KI MAA KA BHOSDA, AAAAGGGGG")
         self._reset_rubric()
 
         self._max_steps = max_steps
@@ -200,6 +202,7 @@ class AccordisEnvironment(Environment):
         **kwargs: Any,
     ) -> MultiNodeObservation:
         """Advance the environment by one synchronous consensus round."""
+        logger.info(f"STEP KI MAA KA BHOSDA, AAAAGGGGG")
         if self._state is None:
             raise RuntimeError("reset() must be called before step()")
 
@@ -367,6 +370,7 @@ class AccordisEnvironment(Environment):
 
     @property
     def state(self) -> AccordisState:
+        logger.info(f"STATE KI MAA KA BHOSDA, AAAAGGGGG")
         if self._state is None:
             raise RuntimeError("reset() must be called before step()")
         return self._state
