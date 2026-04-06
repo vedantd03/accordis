@@ -1,28 +1,421 @@
-"""Custom Gradio UI for Accordis.
+"""Custom Gradio UI for the Accordis BFT consensus environment.
 
-Adds an environment-specific dashboard beside the default OpenEnv playground.
+Builds a "Visualizer" tab shown alongside the default OpenEnv Playground tab.
+The tab contains:
+  - A Plotly network graph of all nodes (honest + Byzantine), with hover tooltips.
+  - A live activity log showing the last operation (reset / step / get_state).
+  - Three action buttons that call reset(), step(), and get_state() via web_manager.
+  - A real-time metrics panel (throughput, view-changes, BFA strategy).
 """
 
 from __future__ import annotations
 
-import html
 import json
 import math
-from enum import Enum
-from typing import Any, Dict, List, Optional, Sequence
+import asyncio
+from typing import Any, Dict, List, Optional
 
 import gradio as gr
 
+# ---------------------------------------------------------------------------
+# Plotly is an optional dependency; we surface a clear message if missing.
+# ---------------------------------------------------------------------------
+try:
+    import plotly.graph_objects as go
+    _PLOTLY_OK = True
+except ImportError:  # pragma: no cover
+    _PLOTLY_OK = False
 
-CONFIG_HEADERS = [
-    "node_id",
-    "view_timeout_ms",
-    "pipeline_depth",
-    "replication_batch_size",
-    "equivocation_threshold",
-    "vote_aggregation_timeout_ms",
-]
 
+# ── Colour palette (dark, modern) ──────────────────────────────────────────
+_DARK_BG       = "#0f1117"
+_CARD_BG       = "#1a1d27"
+_BORDER        = "#2a2d3e"
+_ACCENT_BLUE   = "#4f8ef7"
+_ACCENT_GREEN  = "#22c55e"
+_ACCENT_RED    = "#ef4444"
+_ACCENT_AMBER  = "#f59e0b"
+_ACCENT_PURPLE = "#a855f7"
+_TEXT_PRIMARY  = "#e2e8f0"
+_TEXT_MUTED    = "#64748b"
+_LEADER_COLOUR   = _ACCENT_BLUE
+_REPLICA_COLOUR  = _ACCENT_GREEN
+_BYZANTINE_COLOUR = _ACCENT_RED
+_CANDIDATE_COLOUR = _ACCENT_AMBER
+
+_CSS = f"""
+/* ── Root / global ────────────────────────────────────────────── */
+body, .gradio-container {{
+    background: {_DARK_BG} !important;
+    color: {_TEXT_PRIMARY} !important;
+    font-family: 'Inter', 'Segoe UI', sans-serif !important;
+}}
+/* ── Panel cards ─────────────────────────────────────────────── */
+.accordis-card {{
+    background: {_CARD_BG};
+    border: 1px solid {_BORDER};
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+}}
+/* ── Section titles ──────────────────────────────────────────── */
+.accordis-section-title {{
+    color: {_TEXT_MUTED};
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}}
+/* ── Metric chips ────────────────────────────────────────────── */
+.metric-row {{
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}}
+.metric-chip {{
+    background: {_DARK_BG};
+    border: 1px solid {_BORDER};
+    border-radius: 8px;
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 500;
+}}
+.metric-chip .label {{ color: {_TEXT_MUTED}; font-size: 11px; display: block; }}
+.metric-chip .value {{ color: {_TEXT_PRIMARY}; font-size: 15px; }}
+/* ── Log panel ───────────────────────────────────────────────── */
+.log-panel {{
+    background: {_DARK_BG};
+    border: 1px solid {_BORDER};
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 12px;
+    color: {_TEXT_PRIMARY};
+    max-height: 220px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+}}
+/* ── Buttons ─────────────────────────────────────────────────── */
+.btn-reset  {{ background: {_ACCENT_PURPLE} !important; color: #fff !important; border: none !important; border-radius: 8px !important; }}
+.btn-step   {{ background: {_ACCENT_BLUE}   !important; color: #fff !important; border: none !important; border-radius: 8px !important; }}
+.btn-state  {{ background: {_CARD_BG}       !important; color: {_TEXT_PRIMARY} !important; border: 1px solid {_BORDER} !important; border-radius: 8px !important; }}
+/* ── Legend dots ─────────────────────────────────────────────── */
+.legend {{ display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: {_TEXT_MUTED}; margin-top: 4px; }}
+.legend-dot {{ display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; }}
+"""
+
+
+# ── Graph builder ──────────────────────────────────────────────────────────
+
+def _ring_positions(n: int) -> List[tuple[float, float]]:
+    """Evenly-spaced positions on a unit circle."""
+    return [
+        (math.cos(2 * math.pi * i / n - math.pi / 2),
+         math.sin(2 * math.pi * i / n - math.pi / 2))
+        for i in range(n)
+    ]
+
+
+def _build_node_graph(state: Optional[Dict[str, Any]]) -> "go.Figure":
+    """Return a Plotly figure from parsed state dict (or a placeholder)."""
+    if not _PLOTLY_OK:
+        fig = go.Figure()
+        fig.add_annotation(text="plotly not installed", x=0.5, y=0.5, showarrow=False)
+        return fig
+
+    # ── Parse node list from state ────────────────────────────────────────
+    node_states: Dict[str, Any] = {}
+    bfa_strategy = "none"
+    step_num = 0
+    curriculum = 1
+    n_nodes = 0
+    f_byzantine = 0
+
+    if state:
+        node_states  = state.get("node_states", {})
+        bfa_strategy = state.get("bfa_strategy", "none")
+        step_num     = state.get("step", 0)
+        curriculum   = state.get("curriculum_level", 1)
+        n_nodes      = state.get("n_nodes", len(node_states))
+        f_byzantine  = state.get("f_byzantine", 0)
+
+    if not node_states:
+        # Placeholder: show an instructional message inside the figure
+        fig = go.Figure()
+        fig.update_layout(
+            paper_bgcolor=_CARD_BG,
+            plot_bgcolor=_CARD_BG,
+            font=dict(color=_TEXT_MUTED),
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            margin=dict(l=0, r=0, t=0, b=0),
+            annotations=[dict(
+                text="Click <b>Reset</b> to initialise the cluster",
+                x=0.5, y=0.5, xref="paper", yref="paper",
+                showarrow=False,
+                font=dict(size=15, color=_TEXT_MUTED),
+            )],
+        )
+        return fig
+
+    node_ids  = list(node_states.keys())
+    positions = _ring_positions(len(node_ids))
+
+    # ── Edge traces (full mesh) ────────────────────────────────────────────
+    edge_x, edge_y = [], []
+    for i in range(len(node_ids)):
+        for j in range(i + 1, len(node_ids)):
+            x0, y0 = positions[i]
+            x1, y1 = positions[j]
+            ns_i = node_states[node_ids[i]]
+            ns_j = node_states[node_ids[j]]
+            # Dim edges involving Byzantine nodes
+            if ns_i.get("is_byzantine") or ns_j.get("is_byzantine"):
+                continue  # draw Byzantine edges separately below
+            edge_x += [x0, x1, None]
+            edge_y += [y0, y1, None]
+
+    byz_ex, byz_ey = [], []
+    for i in range(len(node_ids)):
+        for j in range(i + 1, len(node_ids)):
+            ns_i = node_states[node_ids[i]]
+            ns_j = node_states[node_ids[j]]
+            if ns_i.get("is_byzantine") or ns_j.get("is_byzantine"):
+                x0, y0 = positions[i]
+                x1, y1 = positions[j]
+                byz_ex += [x0, x1, None]
+                byz_ey += [y0, y1, None]
+
+    traces = []
+    if edge_x:
+        traces.append(go.Scatter(
+            x=edge_x, y=edge_y, mode="lines",
+            line=dict(width=1.2, color="rgba(100,116,139,0.3)"),
+            hoverinfo="none", showlegend=False,
+        ))
+    if byz_ex:
+        traces.append(go.Scatter(
+            x=byz_ex, y=byz_ey, mode="lines",
+            line=dict(width=1, color="rgba(239,68,68,0.2)", dash="dot"),
+            hoverinfo="none", showlegend=False,
+        ))
+
+    # ── Node traces ────────────────────────────────────────────────────────
+    node_x, node_y, node_colours, node_sizes = [], [], [], []
+    node_symbols: List[str] = []
+    hover_texts: List[str] = []
+    node_labels: List[str] = []
+
+    for idx, nid in enumerate(node_ids):
+        ns   = node_states[nid]
+        x, y = positions[idx]
+        node_x.append(x)
+        node_y.append(y)
+        node_labels.append(nid)
+
+        is_byz  = ns.get("is_byzantine", False)
+        role    = ns.get("current_role", "replica")
+        view    = ns.get("current_view", 0)
+        cfg     = ns.get("config", {})
+        log_len = len(ns.get("committed_log", []))
+
+        if is_byz:
+            colour = _BYZANTINE_COLOUR
+            symbol = "x"
+            size   = 22
+        elif role == "leader":
+            colour = _LEADER_COLOUR
+            symbol = "star"
+            size   = 28
+        elif role == "candidate":
+            colour = _CANDIDATE_COLOUR
+            symbol = "diamond"
+            size   = 24
+        else:
+            colour = _REPLICA_COLOUR
+            symbol = "circle"
+            size   = 22
+
+        node_colours.append(colour)
+        node_symbols.append(symbol)
+        node_sizes.append(size)
+
+        # ── Hover tooltip ────────────────────────────────────────────────
+        vto  = cfg.get("view_timeout_ms",             "—")
+        pd_  = cfg.get("pipeline_depth",              "—")
+        rbs  = cfg.get("replication_batch_size",      "—")
+        eq_t = cfg.get("equivocation_threshold",      "—")
+        vat  = cfg.get("vote_aggregation_timeout_ms", "—")
+        role_label = "BYZANTINE" if is_byz else role.upper()
+        hover_texts.append(
+            f"<b>{nid}</b><br>"
+            f"Role: <b>{role_label}</b><br>"
+            f"View: {view} · Log: {log_len} blocks<br>"
+            f"──────────────────<br>"
+            f"view_timeout_ms: {vto}<br>"
+            f"pipeline_depth: {pd_}<br>"
+            f"replication_batch_size: {rbs}<br>"
+            f"equivocation_threshold: {eq_t}<br>"
+            f"vote_agg_timeout_ms: {vat}"
+        )
+
+    traces.append(go.Scatter(
+        x=node_x, y=node_y,
+        mode="markers+text",
+        marker=dict(
+            color=node_colours,
+            size=node_sizes,
+            symbol=node_symbols,
+            line=dict(width=2, color=_CARD_BG),
+        ),
+        text=node_labels,
+        textposition="top center",
+        textfont=dict(size=11, color=_TEXT_PRIMARY),
+        hovertext=hover_texts,
+        hoverinfo="text",
+        showlegend=False,
+    ))
+
+    # ── Layout ─────────────────────────────────────────────────────────────
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        paper_bgcolor=_CARD_BG,
+        plot_bgcolor=_CARD_BG,
+        font=dict(color=_TEXT_PRIMARY, family="Inter, sans-serif"),
+        xaxis=dict(visible=False, range=[-1.45, 1.45]),
+        yaxis=dict(visible=False, range=[-1.45, 1.45], scaleanchor="x"),
+        margin=dict(l=10, r=10, t=30, b=10),
+        hoverlabel=dict(
+            bgcolor=_DARK_BG,
+            bordercolor=_BORDER,
+            font=dict(color=_TEXT_PRIMARY, size=12),
+        ),
+        title=dict(
+            text=(
+                f"<b>Cluster</b>  ·  Step {step_num}  ·  "
+                f"Level {curriculum}  ·  BFA: <i>{bfa_strategy}</i>"
+            ),
+            font=dict(size=13, color=_TEXT_MUTED),
+            x=0.5, xanchor="center",
+        ),
+    )
+    return fig
+
+
+# ── Metrics formatter ──────────────────────────────────────────────────────
+
+def _metrics_html(state: Optional[Dict[str, Any]], obs: Optional[Dict[str, Any]]) -> str:
+    """Return an HTML snippet with metric chips (all inline styles — no CSS class dependency)."""
+    _chip_base = (
+        f"display:inline-flex;flex-direction:column;gap:2px;"
+        f"background:{_DARK_BG};border:1px solid {_BORDER};"
+        f"border-radius:8px;padding:8px 14px;min-width:80px;"
+    )
+    _label_style = f"font-size:10px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:{_TEXT_MUTED};"
+    _section_style = (
+        f"font-size:11px;font-weight:600;letter-spacing:0.08em;"
+        f"text-transform:uppercase;color:{_TEXT_MUTED};"
+        f"margin-bottom:10px;"
+    )
+
+    if not state:
+        return (
+            f'<div style="{_section_style}">Metrics</div>'
+            f'<p style="color:{_TEXT_MUTED};font-size:13px;margin:0">No data — click Reset first.</p>'
+        )
+
+    step_num    = state.get("step", 0)
+    curriculum  = state.get("curriculum_level", 1)
+    n_nodes     = state.get("n_nodes", 0)
+    f_byzantine = state.get("f_byzantine", 0)
+    bfa         = str(state.get("bfa_strategy", "none")).replace("BFAStrategy.", "")
+    vc          = state.get("view_change_count", 0)
+    fin_txns    = state.get("finalized_txn_count", 0)
+
+    # Aggregate throughput from per-node observations
+    avg_tps = 0.0
+    nodes_obs: Dict[str, Any] = {}
+    if obs and isinstance(obs.get("nodes"), dict):
+        nodes_obs = obs["nodes"]
+    elif obs and isinstance(obs.get("observation"), dict):
+        nodes_obs = obs["observation"].get("nodes", {})
+    if nodes_obs:
+        tps_vals = [n.get("commit_throughput_tps", 0.0) for n in nodes_obs.values()]
+        avg_tps = sum(tps_vals) / max(len(tps_vals), 1)
+
+    def chip(label: str, value: str, colour: str = _TEXT_PRIMARY) -> str:
+        return (
+            f'<div style="{_chip_base}">'
+            f'<span style="{_label_style}">{label}</span>'
+            f'<span style="font-size:16px;font-weight:700;color:{colour};line-height:1.2">{value}</span>'
+            f'</div>'
+        )
+
+    bfa_colour = _ACCENT_RED if bfa not in ("none", "NONE") else _ACCENT_GREEN
+    byz_colour = _ACCENT_RED if f_byzantine else _ACCENT_GREEN
+    vc_colour  = _ACCENT_AMBER if vc else _TEXT_PRIMARY
+
+    row_style = f"display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;"
+
+    chips = "".join([
+        chip("Step",           str(step_num)),
+        chip("Curriculum",     str(curriculum)),
+        chip("Nodes",          str(n_nodes)),
+        chip("Byzantine",      str(f_byzantine), byz_colour),
+        chip("BFA Strategy",   bfa,              bfa_colour),
+        chip("View Changes",   str(vc),          vc_colour),
+        chip("Finalized Txns", str(fin_txns),    _ACCENT_BLUE),
+        chip("Avg TPS",        f"{avg_tps:.2f}", _ACCENT_BLUE),
+    ])
+
+    return (
+        f'<div style="{_section_style}">Live Metrics</div>'
+        f'<div style="{row_style}">{chips}</div>'
+    )
+
+
+# ── Log formatter ──────────────────────────────────────────────────────────
+
+def _fmt_log(operation: str, data: Any) -> str:
+    """Return a concise text summary for the activity log."""
+    if isinstance(data, str):
+        return f"[{operation}] ERROR — {data}"
+    if not data:
+        return f"[{operation}] (no data)"
+
+    lines = [f"[{operation}]"]
+
+    if operation == "reset":
+        obs = data.get("observation", data)
+        nodes = obs.get("nodes", {}) if isinstance(obs, dict) else {}
+        lines.append(f"  nodes initialised: {list(nodes.keys()) or '—'}")
+        lines.append(f"  done={data.get('done')}  reward={data.get('reward')}")
+
+    elif operation == "step":
+        obs = data.get("observation", data)
+        nodes = obs.get("nodes", {}) if isinstance(obs, dict) else {}
+        for nid, nobs in list(nodes.items())[:6]:
+            role = nobs.get("current_role", "?")
+            view = nobs.get("current_view", "?")
+            tps  = nobs.get("commit_throughput_tps", 0.0)
+            lines.append(f"  {nid}: role={role}  view={view}  tps={tps:.2f}")
+        if len(nodes) > 6:
+            lines.append(f"  … (+{len(nodes)-6} more nodes)")
+        lines.append(f"  done={data.get('done')}  reward={data.get('reward')}")
+
+    elif operation == "get_state":
+        step = data.get("step", "?")
+        bfa  = data.get("bfa_strategy", "?")
+        fin  = data.get("finalized_txn_count", "?")
+        lines.append(f"  step={step}  bfa_strategy={bfa}  finalized_txns={fin}")
+
+    return "\n".join(lines)
+
+
+# ── Main builder ───────────────────────────────────────────────────────────
 
 def build_accordis_gradio_app(
     web_manager: Any,
@@ -32,737 +425,181 @@ def build_accordis_gradio_app(
     title: str,
     quick_start_md: str,
 ) -> gr.Blocks:
-    """Build the Accordis-specific Gradio dashboard."""
-    del action_fields, is_chat_env
+    """
+    Returns a gr.Blocks that becomes the 'Custom' tab in the TabbedInterface.
 
-    initial_snapshot = {"last_response": None, "last_operation": "reset"}
+    Layout
+    ──────
+    Left column  : cluster graph (Plotly) + legend
+    Right column : metrics strip + action buttons + activity log + state JSON
+    """
 
-    async def handle_reset(
-        n_nodes: int,
-        f_byzantine: int,
-        curriculum_level: int,
-        max_steps: int,
-        pool_size: int,
-        leader_rotation: str,
-        session_snapshot: Dict[str, Any],
-    ):
-        del session_snapshot
-        honest_floor = max(0, int(n_nodes) - 1)
-        bounded_f_byzantine = max(0, min(int(f_byzantine), honest_floor))
-        response = await web_manager.reset_environment(
-            {
-                "n_nodes": int(n_nodes),
-                "f_byzantine": bounded_f_byzantine,
-                "curriculum_level": int(curriculum_level),
-                "max_steps": int(max_steps),
-                "pool_size": int(pool_size),
-                "leader_rotation": str(leader_rotation),
+    # Shared in-memory state across callbacks (one env per server process)
+    _shared: Dict[str, Any] = {"state": None, "last_obs": None, "log": "Ready — click Reset to begin."}
+
+    # ── Async helpers ──────────────────────────────────────────────────────
+
+    async def _do_reset():
+        try:
+            data = await web_manager.reset_environment()
+        except Exception as exc:
+            data = str(exc)
+        # Refresh state after reset
+        try:
+            state = web_manager.get_state()
+        except Exception:
+            state = None
+        _shared["state"]    = state
+        _shared["last_obs"] = data if isinstance(data, dict) else None
+        _shared["log"]      = _fmt_log("reset", data)
+        return _refresh_ui()
+
+    async def _do_step():
+        if _shared["state"] is None:
+            _shared["log"] = "[step] Not started — click Reset first."
+            return _refresh_ui()
+        # Build a no-op action that keeps current configs unchanged
+        state       = _shared["state"]
+        node_states = state.get("node_states", {}) if state else {}
+        nodes_action: Dict[str, Any] = {}
+        for nid, ns in node_states.items():
+            if ns.get("is_byzantine"):
+                continue
+            cfg = ns.get("config", {})
+            nodes_action[nid] = {
+                "node_id":                     nid,
+                "view_timeout_ms":             cfg.get("view_timeout_ms",             2000),
+                "pipeline_depth":              cfg.get("pipeline_depth",              2),
+                "replication_batch_size":      cfg.get("replication_batch_size",      64),
+                "equivocation_threshold":      cfg.get("equivocation_threshold",      5),
+                "vote_aggregation_timeout_ms": cfg.get("vote_aggregation_timeout_ms", 500),
             }
-        )
-        session = {"last_response": response, "last_operation": "reset"}
-        state = _safe_get_state(web_manager)
-        dashboard = _render_dashboard(state, response, "reset")
-        status = (
-            f"Reset complete. Episode {dashboard['state_summary'].get('episode_id', 'n/a')} "
-            f"started with {dashboard['state_summary'].get('honest_nodes', 0)} honest nodes."
-        )
-        return (
-            dashboard["operation_html"],
-            dashboard["summary_html"],
-            dashboard["graph_html"],
-            dashboard["action_rows"],
-            dashboard["state_json"],
-            dashboard["response_json"],
-            status,
-            session,
-        )
+        action_payload = {"nodes": nodes_action}
+        try:
+            data = await web_manager.step_environment(action_payload)
+        except Exception as exc:
+            data = str(exc)
+        try:
+            new_state = web_manager.get_state()
+        except Exception:
+            new_state = _shared["state"]
+        _shared["state"]    = new_state
+        _shared["last_obs"] = data if isinstance(data, dict) else None
+        _shared["log"]      = _fmt_log("step", data)
+        return _refresh_ui()
 
-    async def handle_step(
-        action_rows: Any,
-        session_snapshot: Dict[str, Any],
-    ):
-        response = await web_manager.step_environment(_action_from_rows(action_rows))
-        session = {"last_response": response, "last_operation": "step"}
-        state = _safe_get_state(web_manager)
-        dashboard = _render_dashboard(state, response, "step")
-        reward = response.get("reward")
-        done = response.get("done")
-        reward_text = "n/a" if reward is None else f"{float(reward):.3f}"
-        status = f"Step complete. Reward {reward_text}. Done: {bool(done)}."
-        del session_snapshot
-        return (
-            dashboard["operation_html"],
-            dashboard["summary_html"],
-            dashboard["graph_html"],
-            dashboard["action_rows"],
-            dashboard["state_json"],
-            dashboard["response_json"],
-            status,
-            session,
-        )
+    def _do_get_state():
+        try:
+            state = web_manager.get_state()
+        except Exception as exc:
+            state = {"error": str(exc)}
+        _shared["state"] = state
+        _shared["log"]   = _fmt_log("get_state", state)
+        return _refresh_ui()
 
-    def handle_state(session_snapshot: Dict[str, Any]):
-        last_response = (session_snapshot or {}).get("last_response")
-        dashboard = _render_dashboard(_safe_get_state(web_manager), last_response, "get_state")
-        session = {
-            "last_response": last_response,
-            "last_operation": "get_state",
-        }
-        status = "State snapshot refreshed from get_state()."
-        return (
-            dashboard["operation_html"],
-            dashboard["summary_html"],
-            dashboard["graph_html"],
-            dashboard["action_rows"],
-            dashboard["state_json"],
-            dashboard["response_json"],
-            status,
-            session,
+    # ── UI refresh helper (returns values for all outputs) ─────────────────
+
+    def _refresh_ui():
+        state    = _shared["state"]
+        last_obs = _shared["last_obs"]
+        fig      = _build_node_graph(state)
+        metrics  = _metrics_html(state, last_obs)
+        log_txt  = _shared["log"]
+        state_json = json.dumps(state, indent=2, default=str) if state else "null"
+        return fig, metrics, log_txt, state_json
+
+    # ── Gradio layout ──────────────────────────────────────────────────────
+
+    _section_title_style = (
+        f"font-size:11px;font-weight:600;letter-spacing:0.08em;"
+        f"text-transform:uppercase;color:{_TEXT_MUTED};margin-bottom:8px;"
+    )
+
+    with gr.Blocks(
+        title="Accordis — BFT Cluster Visualizer",
+        css=_CSS,
+    ) as demo:
+
+        gr.HTML(
+            f'<div style="padding:16px 0 8px;border-bottom:1px solid {_BORDER};margin-bottom:16px">'
+            f'<span style="font-size:20px;font-weight:700;color:{_TEXT_PRIMARY}">Accordis</span>'
+            f'<span style="font-size:13px;color:{_TEXT_MUTED};margin-left:12px">BFT Consensus Cluster Visualizer</span>'
+            f'</div>'
         )
 
-    def handle_load(session_snapshot: Dict[str, Any]):
-        current_state = _safe_get_state(web_manager, allow_empty=True)
-        last_response = (session_snapshot or {}).get("last_response")
-        last_operation = (session_snapshot or {}).get("last_operation") or "reset"
-        dashboard = _render_dashboard(current_state, last_response, last_operation)
-        return (
-            dashboard["operation_html"],
-            dashboard["summary_html"],
-            dashboard["graph_html"],
-            dashboard["action_rows"],
-            dashboard["state_json"],
-            dashboard["response_json"],
-            "Use reset() to start a cluster, then step() or get_state() to inspect it.",
-            session_snapshot or initial_snapshot,
-        )
-
-    with gr.Blocks(title=title) as demo:
-        gr.HTML(_dashboard_styles())
-        session_state = gr.State(initial_snapshot)
-
-        gr.Markdown(
-            f"""
-            # Accordis Control Center
-
-            Visualize the consensus cluster as a live node topology, hover nodes for details,
-            and drive the environment through `reset()`, `step()`, and `get_state()`.
-            """
-        )
-
+        # ── TOP ROW: graph (left) + controls (right) ───────────────────────
+        # The JSON accordion is kept OUTSIDE this row so it never shifts the graph.
         with gr.Row():
-            with gr.Column(scale=1, min_width=340):
-                gr.Markdown("### API Controls")
-                n_nodes = gr.Slider(
-                    minimum=4,
-                    maximum=12,
-                    step=1,
-                    value=4,
-                    label="n_nodes",
+
+            # LEFT — cluster topology, pinned to the top with align-self
+            with gr.Column(scale=3, min_width=360, elem_id="accordis-left-col"):
+                gr.HTML(f'<div style="{_section_title_style}">Cluster Topology</div>')
+                cluster_plot = gr.Plot(
+                    value=_build_node_graph(None),
+                    label="",
+                    show_label=False,
+                    container=False,
                 )
-                f_byzantine = gr.Slider(
-                    minimum=0,
-                    maximum=4,
-                    step=1,
-                    value=0,
-                    label="f_byzantine",
+                _legend_dot = (
+                    "display:inline-block;width:10px;height:10px;"
+                    "border-radius:50%;margin-right:5px;vertical-align:middle;"
                 )
-                curriculum_level = gr.Slider(
-                    minimum=1,
-                    maximum=5,
-                    step=1,
-                    value=1,
-                    label="curriculum_level",
+                gr.HTML(
+                    f'<div style="display:flex;gap:18px;flex-wrap:wrap;'
+                    f'font-size:12px;color:{_TEXT_MUTED};margin-top:6px;padding-bottom:4px">'
+                    f'<span><span style="{_legend_dot}background:{_LEADER_COLOUR}"></span>Leader (★)</span>'
+                    f'<span><span style="{_legend_dot}background:{_REPLICA_COLOUR}"></span>Replica (●)</span>'
+                    f'<span><span style="{_legend_dot}background:{_BYZANTINE_COLOUR}"></span>Byzantine (✕)</span>'
+                    f'<span><span style="{_legend_dot}background:{_CANDIDATE_COLOUR}"></span>Candidate (◆)</span>'
+                    f'</div>'
                 )
-                max_steps = gr.Slider(
-                    minimum=10,
-                    maximum=200,
-                    step=10,
-                    value=200,
-                    label="max_steps",
-                )
-                pool_size = gr.Slider(
-                    minimum=100,
-                    maximum=2000,
-                    step=100,
-                    value=1000,
-                    label="pool_size",
-                )
-                leader_rotation = gr.Dropdown(
-                    choices=["round_robin", "vrf", "reputation_weighted"],
-                    value="round_robin",
-                    label="leader_rotation",
-                )
+
+            # RIGHT — metrics + buttons + log (fixed height, no expanding content here)
+            with gr.Column(scale=2, min_width=280):
+
+                metrics_html = gr.HTML(value=_metrics_html(None, None))
+
+                gr.HTML(f'<div style="{_section_title_style};margin-top:14px">Operations</div>')
                 with gr.Row():
-                    reset_btn = gr.Button("reset()", variant="primary")
-                    state_btn = gr.Button("get_state()", variant="secondary")
+                    btn_reset = gr.Button("⟳  Reset",     elem_classes="btn-reset", size="sm")
+                    btn_step  = gr.Button("▶  Step",      elem_classes="btn-step",  size="sm")
+                    btn_state = gr.Button("◎  Get State", elem_classes="btn-state", size="sm")
 
-                gr.Markdown("### step() Action Table")
-                action_table = gr.Dataframe(
-                    headers=CONFIG_HEADERS,
-                    datatype=["str", "number", "number", "number", "number", "number"],
-                    value=[],
-                    interactive=True,
-                    wrap=True,
-                    row_count=(1, "dynamic"),
-                    col_count=(len(CONFIG_HEADERS), "fixed"),
-                    label="Editable per-node BFT configuration",
-                )
-                step_btn = gr.Button("step()", variant="secondary")
-                status_box = gr.Markdown(
-                    "Use reset() to populate the table with honest nodes."
+                gr.HTML(f'<div style="{_section_title_style};margin-top:14px">Activity Log</div>')
+                log_box = gr.Textbox(
+                    value="Ready — click Reset to begin.",
+                    label="",
+                    show_label=False,
+                    lines=7,
+                    max_lines=7,
+                    interactive=False,
+                    container=False,
                 )
 
-                if quick_start_md:
-                    with gr.Accordion("Quick Start", open=False):
-                        gr.Markdown(quick_start_md)
-                readme_content = getattr(metadata, "readme_content", "") if metadata else ""
-                if readme_content:
-                    with gr.Accordion("README", open=False):
-                        gr.Markdown(readme_content)
-
-            with gr.Column(scale=2):
-                operation_html = gr.HTML(_empty_operation_html())
-                summary_html = gr.HTML(_empty_summary_html())
-                graph_html = gr.HTML(_empty_graph_html())
-
+        # ── BOTTOM ROW: full-width JSON (expanding this never touches the graph) ──
         with gr.Row():
-            state_json = gr.Code(
-                label="State Snapshot",
-                value=_pretty_json({"message": "State will appear here after get_state() or reset()."}),
-                language="json",
-                interactive=False,
-            )
-            response_json = gr.Code(
-                label="Last API Response",
-                value=_pretty_json({"message": "The latest reset() or step() payload will appear here."}),
-                language="json",
-                interactive=False,
-            )
+            with gr.Column():
+                with gr.Accordion("Full State JSON", open=False):
+                    state_json_box = gr.Code(
+                        value="null",
+                        language="json",
+                        label="",
+                        show_label=False,
+                        interactive=False,
+                    )
 
-        outputs = [
-            operation_html,
-            summary_html,
-            graph_html,
-            action_table,
-            state_json,
-            response_json,
-            status_box,
-            session_state,
-        ]
+        # Pin the left column to the top so it doesn't stretch when right grows
+        gr.HTML(
+            "<style>"
+            "#accordis-left-col { align-self: flex-start !important; }"
+            "</style>"
+        )
 
-        demo.load(fn=handle_load, inputs=[session_state], outputs=outputs)
-        reset_btn.click(
-            fn=handle_reset,
-            inputs=[
-                n_nodes,
-                f_byzantine,
-                curriculum_level,
-                max_steps,
-                pool_size,
-                leader_rotation,
-                session_state,
-            ],
-            outputs=outputs,
-        )
-        step_btn.click(
-            fn=handle_step,
-            inputs=[action_table, session_state],
-            outputs=outputs,
-        )
-        state_btn.click(
-            fn=handle_state,
-            inputs=[session_state],
-            outputs=outputs,
-        )
+        # ── Wire buttons ───────────────────────────────────────────────────
+        _outputs = [cluster_plot, metrics_html, log_box, state_json_box]
+
+        btn_reset.click(fn=_do_reset,    inputs=[], outputs=_outputs)
+        btn_step.click( fn=_do_step,     inputs=[], outputs=_outputs)
+        btn_state.click(fn=_do_get_state,inputs=[], outputs=_outputs)
 
     return demo
-
-
-def _safe_get_state(web_manager: Any, allow_empty: bool = False) -> Dict[str, Any]:
-    state = _json_safe(web_manager.get_state())
-    if allow_empty or state.get("node_states"):
-        return state
-    return {}
-
-
-def _render_dashboard(
-    state: Optional[Dict[str, Any]],
-    response: Optional[Dict[str, Any]],
-    last_operation: str,
-) -> Dict[str, Any]:
-    safe_state = _json_safe(state or {})
-    safe_response = _json_safe(response or {})
-    state_summary = _compact_state_for_display(safe_state, safe_response)
-    return {
-        "operation_html": _build_operation_html(state_summary, safe_response, last_operation),
-        "summary_html": _build_summary_html(state_summary, safe_response),
-        "graph_html": _build_node_graph_html(safe_state, safe_response.get("observation", {})),
-        "action_rows": _action_rows_from_state(safe_state, safe_response.get("observation", {})),
-        "state_json": _pretty_json(state_summary),
-        "response_json": _pretty_json(safe_response or {"message": "No reset() or step() response yet."}),
-        "state_summary": state_summary,
-    }
-
-
-def _compact_state_for_display(
-    state: Dict[str, Any],
-    response: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    node_states = state.get("node_states", {}) or {}
-    observation_nodes = ((response or {}).get("observation") or {}).get("nodes", {})
-
-    node_summaries = []
-    honest_nodes = 0
-    byzantine_nodes = 0
-    pending_count = 0
-
-    for node_id, node_state in sorted(node_states.items()):
-        is_byzantine = bool(node_state.get("is_byzantine"))
-        observation = observation_nodes.get(node_id, {})
-        config = node_state.get("config", {}) or observation.get("current_config", {})
-        committed_blocks = len(node_state.get("committed_log", []) or [])
-        role = observation.get("current_role") or node_state.get("current_role") or "replica"
-        view = observation.get("current_view", node_state.get("current_view", 0))
-        pending_count = max(pending_count, int(observation.get("pending_txn_count", 0) or 0))
-        node_summaries.append(
-            {
-                "node_id": node_id,
-                "is_byzantine": is_byzantine,
-                "role": role,
-                "view": int(view or 0),
-                "committed_blocks": committed_blocks,
-                "throughput_tps": float(observation.get("commit_throughput_tps", 0.0) or 0.0),
-                "pipeline_utilisation": float(observation.get("pipeline_utilisation", 0.0) or 0.0),
-                "pending_txn_count": int(observation.get("pending_txn_count", 0) or 0),
-                "config": config,
-            }
-        )
-        if is_byzantine:
-            byzantine_nodes += 1
-        else:
-            honest_nodes += 1
-
-    return {
-        "episode_id": state.get("episode_id"),
-        "step": int(state.get("step", 0) or 0),
-        "curriculum_level": int(state.get("curriculum_level", 0) or 0),
-        "leader_rotation": state.get("leader_rotation"),
-        "bfa_strategy": state.get("bfa_strategy"),
-        "n_nodes": int(state.get("n_nodes", len(node_states)) or len(node_states)),
-        "f_byzantine": int(state.get("f_byzantine", byzantine_nodes) or byzantine_nodes),
-        "honest_nodes": honest_nodes,
-        "byzantine_nodes": byzantine_nodes,
-        "view_change_count": int(state.get("view_change_count", 0) or 0),
-        "finalized_txn_count": int(state.get("finalized_txn_count", 0) or 0),
-        "txn_pool_size": len(state.get("episode_txn_pool", []) or []),
-        "proposal_registry_size": len(
-            ((state.get("proposal_registry") or {}).get("honest_proposals") or {})
-        ),
-        "pending_txn_count": pending_count,
-        "nodes": node_summaries,
-    }
-
-
-def _build_operation_html(
-    state_summary: Dict[str, Any],
-    response: Dict[str, Any],
-    last_operation: str,
-) -> str:
-    reward = response.get("reward")
-    reward_value = "n/a" if reward is None else f"{float(reward):.3f}"
-    done = bool(response.get("done")) if response else False
-    termination = (response.get("metadata") or {}).get("termination_reason") or "active"
-    episode_id = state_summary.get("episode_id") or "not-started"
-    cards = [
-        (
-            "reset()",
-            "Create a fresh cluster, configure network conditions, and seed the episode.",
-            f"{state_summary.get('honest_nodes', 0)} honest / {state_summary.get('byzantine_nodes', 0)} Byzantine",
-        ),
-        (
-            "step()",
-            "Apply the per-node tuning table, advance one consensus round, and capture reward.",
-            f"step {state_summary.get('step', 0)} | reward {reward_value} | done {str(done).lower()}",
-        ),
-        (
-            "get_state()",
-            "Inspect the authoritative environment state without advancing the simulation.",
-            f"episode {episode_id} | termination {termination}",
-        ),
-    ]
-
-    card_html = []
-    for name, description, live_detail in cards:
-        active_class = " api-card-active" if name.rstrip("()") == last_operation.rstrip("()") else ""
-        card_html.append(
-            f"""
-            <div class="api-card{active_class}">
-              <div class="api-card-title">{html.escape(name)}</div>
-              <div class="api-card-copy">{html.escape(description)}</div>
-              <div class="api-card-detail">{html.escape(live_detail)}</div>
-            </div>
-            """
-        )
-
-    return f"""
-    <div class="accordis-shell">
-      <div class="section-title">API Flow</div>
-      <div class="api-grid">
-        {''.join(card_html)}
-      </div>
-    </div>
-    """
-
-
-def _build_summary_html(state_summary: Dict[str, Any], response: Dict[str, Any]) -> str:
-    reward = response.get("reward")
-    stats = [
-        ("Honest Nodes", str(state_summary.get("honest_nodes", 0))),
-        ("Byzantine Nodes", str(state_summary.get("byzantine_nodes", 0))),
-        ("Finalized Txns", str(state_summary.get("finalized_txn_count", 0))),
-        ("Pending Txns", str(state_summary.get("pending_txn_count", 0))),
-        ("View Changes", str(state_summary.get("view_change_count", 0))),
-        (
-            "Reward",
-            "n/a" if reward is None else f"{float(reward):.3f}",
-        ),
-    ]
-    stat_html = [
-        f"""
-        <div class="metric-card">
-          <div class="metric-label">{html.escape(label)}</div>
-          <div class="metric-value">{html.escape(value)}</div>
-        </div>
-        """
-        for label, value in stats
-    ]
-    return f"""
-    <div class="accordis-shell">
-      <div class="section-title">Live Metrics</div>
-      <div class="metric-grid">
-        {''.join(stat_html)}
-      </div>
-    </div>
-    """
-
-
-def _build_node_graph_html(
-    state: Dict[str, Any],
-    observation: Optional[Dict[str, Any]] = None,
-) -> str:
-    node_states = sorted((state.get("node_states") or {}).items())
-    observation_nodes = (observation or {}).get("nodes", {}) if observation else {}
-    if not node_states:
-        return _empty_graph_html()
-
-    width = 880
-    height = 520
-    center_x = width / 2
-    center_y = height / 2
-    radius = 175 if len(node_states) <= 6 else 205
-
-    node_svg = []
-    edge_svg = []
-
-    for index, (node_id, node_state) in enumerate(node_states):
-        angle = (2 * math.pi * index / max(1, len(node_states))) - (math.pi / 2)
-        x = center_x + radius * math.cos(angle)
-        y = center_y + radius * math.sin(angle)
-        obs = observation_nodes.get(node_id, {})
-        role = obs.get("current_role") or node_state.get("current_role") or "replica"
-        is_byzantine = bool(node_state.get("is_byzantine"))
-        leader = role == "leader"
-        fill = "#ff8d6b" if is_byzantine else "#3cc0b1"
-        stroke = "#5b2d1f" if is_byzantine else "#0f4f4b"
-        role_label = "BYZ" if is_byzantine else str(role).upper()
-        config = node_state.get("config", {}) or {}
-        tooltip = "\n".join(
-            [
-                node_id,
-                f"role: {role}",
-                f"view: {obs.get('current_view', node_state.get('current_view', 0))}",
-                f"committed blocks: {len(node_state.get('committed_log', []) or [])}",
-                f"pending txns: {obs.get('pending_txn_count', 0)}",
-                f"throughput: {float(obs.get('commit_throughput_tps', 0.0) or 0.0):.2f} TPS",
-                f"pipeline util: {float(obs.get('pipeline_utilisation', 0.0) or 0.0):.2f}",
-                f"timeout: {config.get('view_timeout_ms', 0)} ms",
-                f"batch: {config.get('replication_batch_size', 0)}",
-            ]
-        )
-        edge_svg.append(
-            f'<line x1="{center_x}" y1="{center_y}" x2="{x}" y2="{y}" '
-            'stroke="rgba(38, 75, 88, 0.18)" stroke-width="2" />'
-        )
-        ring = (
-            f'<circle cx="{x}" cy="{y}" r="32" fill="none" '
-            'stroke="#f4c95d" stroke-width="3" />'
-            if leader
-            else ""
-        )
-        node_svg.append(
-            f"""
-            <g>
-              <title>{html.escape(tooltip)}</title>
-              {ring}
-              <circle cx="{x}" cy="{y}" r="24" fill="{fill}" stroke="{stroke}" stroke-width="2.5" />
-              <text x="{x}" y="{y - 4}" text-anchor="middle" class="node-name">{html.escape(node_id)}</text>
-              <text x="{x}" y="{y + 14}" text-anchor="middle" class="node-role">{html.escape(role_label)}</text>
-            </g>
-            """
-        )
-
-    leader_rotation = state.get("leader_rotation", "unknown")
-    strategy = state.get("bfa_strategy", "none")
-    step = state.get("step", 0)
-    return f"""
-    <div class="accordis-shell">
-      <div class="section-title">Consensus Topology</div>
-      <div class="graph-caption">
-        Hover nodes to inspect role, view, throughput, pending transactions, and config.
-      </div>
-      <svg class="topology-svg" viewBox="0 0 {width} {height}" role="img" aria-label="Accordis node graph">
-        <defs>
-          <radialGradient id="accordisCore" cx="50%" cy="50%" r="70%">
-            <stop offset="0%" stop-color="#effcf9"></stop>
-            <stop offset="100%" stop-color="#dbeef1"></stop>
-          </radialGradient>
-        </defs>
-        <rect x="0" y="0" width="{width}" height="{height}" rx="28" fill="#f7fbfc"></rect>
-        <circle cx="{center_x}" cy="{center_y}" r="82" fill="url(#accordisCore)" stroke="#9fc7cf" stroke-width="2"></circle>
-        <text x="{center_x}" y="{center_y - 10}" text-anchor="middle" class="core-title">Consensus Fabric</text>
-        <text x="{center_x}" y="{center_y + 14}" text-anchor="middle" class="core-copy">step {html.escape(str(step))}</text>
-        <text x="{center_x}" y="{center_y + 34}" text-anchor="middle" class="core-copy">
-          {html.escape(str(leader_rotation))} | {html.escape(str(strategy))}
-        </text>
-        {''.join(edge_svg)}
-        {''.join(node_svg)}
-      </svg>
-    </div>
-    """
-
-
-def _action_rows_from_state(
-    state: Dict[str, Any],
-    observation: Optional[Dict[str, Any]] = None,
-) -> List[List[Any]]:
-    rows: List[List[Any]] = []
-    node_states = state.get("node_states", {}) or {}
-    observation_nodes = (observation or {}).get("nodes", {}) if observation else {}
-    for node_id, node_state in sorted(node_states.items()):
-        if node_state.get("is_byzantine"):
-            continue
-        config = node_state.get("config", {}) or (
-            (observation_nodes.get(node_id) or {}).get("current_config", {})
-        )
-        rows.append(
-            [
-                node_id,
-                int(config.get("view_timeout_ms", 2000) or 2000),
-                int(config.get("pipeline_depth", 2) or 2),
-                int(config.get("replication_batch_size", 64) or 64),
-                int(config.get("equivocation_threshold", 5) or 5),
-                int(config.get("vote_aggregation_timeout_ms", 500) or 500),
-            ]
-        )
-    return rows
-
-
-def _action_from_rows(rows: Any) -> Dict[str, Any]:
-    normalized_rows = _normalize_rows(rows)
-    nodes: Dict[str, Dict[str, Any]] = {}
-    for row in normalized_rows:
-        if not row:
-            continue
-        node_id = str(row[0]).strip()
-        if not node_id:
-            continue
-        nodes[node_id] = {
-            "node_id": node_id,
-            "view_timeout_ms": _as_int(row, 1, 2000),
-            "pipeline_depth": _as_int(row, 2, 2),
-            "replication_batch_size": _as_int(row, 3, 64),
-            "equivocation_threshold": _as_int(row, 4, 5),
-            "vote_aggregation_timeout_ms": _as_int(row, 5, 500),
-        }
-    if not nodes:
-        raise gr.Error("Reset the environment first, then edit the action table before calling step().")
-    return {"nodes": nodes}
-
-
-def _normalize_rows(rows: Any) -> List[List[Any]]:
-    if rows is None:
-        return []
-    if hasattr(rows, "values") and hasattr(rows.values, "tolist"):
-        return rows.values.tolist()
-    if isinstance(rows, list):
-        return rows
-    return []
-
-
-def _as_int(row: Sequence[Any], index: int, default: int) -> int:
-    try:
-        value = row[index]
-    except IndexError:
-        return default
-    if value in (None, ""):
-        return default
-    return int(float(value))
-
-
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, Enum):
-        return value.value
-    if hasattr(value, "model_dump"):
-        return _json_safe(value.model_dump())
-    if isinstance(value, dict):
-        return {str(k): _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    return value
-
-
-def _pretty_json(value: Any) -> str:
-    return json.dumps(_json_safe(value), indent=2, sort_keys=False)
-
-
-def _empty_operation_html() -> str:
-    return _build_operation_html({}, {}, "reset")
-
-
-def _empty_summary_html() -> str:
-    return _build_summary_html({}, {})
-
-
-def _empty_graph_html() -> str:
-    return """
-    <div class="accordis-shell">
-      <div class="section-title">Consensus Topology</div>
-      <div class="graph-empty">
-        Reset the environment to render the node topology.
-      </div>
-    </div>
-    """
-
-
-def _dashboard_styles() -> str:
-    return """
-    <style>
-      .accordis-shell {
-        --bg-soft: #f7fbfc;
-        --bg-panel: #ffffff;
-        --ink: #18323d;
-        --muted: #5d7983;
-        --teal: #3cc0b1;
-        --amber: #f4c95d;
-        --coral: #ff8d6b;
-        --line: #d5e5e8;
-        font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
-        color: var(--ink);
-      }
-
-      .section-title {
-        font-size: 1.02rem;
-        font-weight: 700;
-        letter-spacing: 0.01em;
-        margin-bottom: 0.6rem;
-      }
-
-      .api-grid,
-      .metric-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 0.9rem;
-      }
-
-      .api-card,
-      .metric-card {
-        background: linear-gradient(180deg, #ffffff 0%, #f8fbfc 100%);
-        border: 1px solid var(--line);
-        border-radius: 18px;
-        padding: 1rem;
-        box-shadow: 0 12px 28px rgba(17, 41, 51, 0.06);
-      }
-
-      .api-card-active {
-        border-color: #7fcfc5;
-        box-shadow: 0 16px 30px rgba(60, 192, 177, 0.16);
-      }
-
-      .api-card-title,
-      .metric-label {
-        color: var(--muted);
-        font-size: 0.88rem;
-        font-weight: 700;
-        margin-bottom: 0.4rem;
-      }
-
-      .api-card-copy {
-        font-size: 0.94rem;
-        line-height: 1.45;
-        min-height: 3.6rem;
-      }
-
-      .api-card-detail,
-      .metric-value {
-        margin-top: 0.7rem;
-        font-size: 1.05rem;
-        font-weight: 700;
-      }
-
-      .graph-caption {
-        color: var(--muted);
-        font-size: 0.92rem;
-        margin-bottom: 0.75rem;
-      }
-
-      .graph-empty {
-        background: linear-gradient(180deg, #ffffff 0%, #f7fbfc 100%);
-        border: 1px dashed var(--line);
-        border-radius: 22px;
-        padding: 2.4rem 1.2rem;
-        text-align: center;
-        color: var(--muted);
-      }
-
-      .topology-svg {
-        width: 100%;
-        height: auto;
-        border-radius: 24px;
-        border: 1px solid var(--line);
-        box-shadow: 0 18px 36px rgba(17, 41, 51, 0.07);
-        background: var(--bg-soft);
-      }
-
-      .node-name {
-        fill: #0d2c38;
-        font-size: 11px;
-        font-weight: 700;
-      }
-
-      .node-role {
-        fill: #123f49;
-        font-size: 9px;
-        font-weight: 700;
-        letter-spacing: 0.08em;
-      }
-
-      .core-title {
-        fill: #204553;
-        font-size: 20px;
-        font-weight: 700;
-      }
-
-      .core-copy {
-        fill: #50707c;
-        font-size: 12px;
-        font-weight: 600;
-      }
-
-      @media (max-width: 980px) {
-        .api-grid,
-        .metric-grid {
-          grid-template-columns: 1fr;
-        }
-      }
-    </style>
-    """
