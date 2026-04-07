@@ -1,11 +1,13 @@
 """Custom Gradio UI for the Accordis BFT consensus environment.
 
 Builds a "Visualizer" tab shown alongside the default OpenEnv Playground tab.
-The tab contains:
-  - A Plotly network graph of all nodes (honest + Byzantine), with hover tooltips.
-  - A live activity log showing the last operation (reset / step / get_state).
-  - Three action buttons that call reset(), step(), and get_state() via web_manager.
-  - A real-time metrics panel (throughput, view-changes, BFA strategy).
+
+Layout
+──────
+Header bar  — episode status, step counter, live health badge
+Left  col   — Plotly cluster topology graph + legend
+Right col   — Live metrics chips  /  Byzantine activity panel  /  buttons  /  log
+Bottom row  — Honest-node table  |  Full state JSON (accordions)
 """
 
 from __future__ import annotations
@@ -17,101 +19,73 @@ from typing import Any, Dict, List, Optional
 
 import gradio as gr
 
-# ---------------------------------------------------------------------------
-# Plotly is an optional dependency; we surface a clear message if missing.
-# ---------------------------------------------------------------------------
 try:
     import plotly.graph_objects as go
     _PLOTLY_OK = True
-except ImportError:  # pragma: no cover
+except ImportError:
     _PLOTLY_OK = False
 
 
-# ── Colour palette (dark, modern) ──────────────────────────────────────────
-_DARK_BG       = "#0f1117"
-_CARD_BG       = "#1a1d27"
-_BORDER        = "#2a2d3e"
-_ACCENT_BLUE   = "#4f8ef7"
-_ACCENT_GREEN  = "#22c55e"
-_ACCENT_RED    = "#ef4444"
-_ACCENT_AMBER  = "#f59e0b"
-_ACCENT_PURPLE = "#a855f7"
-_TEXT_PRIMARY  = "#e2e8f0"
-_TEXT_MUTED    = "#64748b"
+# ── Colour palette ─────────────────────────────────────────────────────────
+_DARK_BG        = "#0d1117"
+_CARD_BG        = "#161b22"
+_CARD_BG2       = "#1c2128"
+_BORDER         = "#30363d"
+_BORDER_LIGHT   = "#21262d"
+_ACCENT_BLUE    = "#58a6ff"
+_ACCENT_GREEN   = "#3fb950"
+_ACCENT_RED     = "#f85149"
+_ACCENT_AMBER   = "#d29922"
+_ACCENT_PURPLE  = "#bc8cff"
+_ACCENT_CYAN    = "#39c5cf"
+_TEXT_PRIMARY   = "#e6edf3"
+_TEXT_SECONDARY = "#8b949e"
+_TEXT_MUTED     = "#484f58"
+
 _LEADER_COLOUR   = _ACCENT_BLUE
 _REPLICA_COLOUR  = _ACCENT_GREEN
 _BYZANTINE_COLOUR = _ACCENT_RED
 _CANDIDATE_COLOUR = _ACCENT_AMBER
 
 _CSS = f"""
-/* ── Root / global ────────────────────────────────────────────── */
 body, .gradio-container {{
     background: {_DARK_BG} !important;
     color: {_TEXT_PRIMARY} !important;
     font-family: 'Inter', 'Segoe UI', sans-serif !important;
 }}
-/* ── Panel cards ─────────────────────────────────────────────── */
-.accordis-card {{
-    background: {_CARD_BG};
-    border: 1px solid {_BORDER};
-    border-radius: 12px;
-    padding: 16px 20px;
-    margin-bottom: 12px;
-}}
-/* ── Section titles ──────────────────────────────────────────── */
-.accordis-section-title {{
-    color: {_TEXT_MUTED};
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    margin-bottom: 8px;
-}}
-/* ── Metric chips ────────────────────────────────────────────── */
-.metric-row {{
-    display: flex;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin-bottom: 10px;
-}}
-.metric-chip {{
-    background: {_DARK_BG};
-    border: 1px solid {_BORDER};
-    border-radius: 8px;
-    padding: 6px 14px;
-    font-size: 13px;
-    font-weight: 500;
-}}
-.metric-chip .label {{ color: {_TEXT_MUTED}; font-size: 11px; display: block; }}
-.metric-chip .value {{ color: {_TEXT_PRIMARY}; font-size: 15px; }}
-/* ── Log panel ───────────────────────────────────────────────── */
-.log-panel {{
-    background: {_DARK_BG};
-    border: 1px solid {_BORDER};
-    border-radius: 8px;
-    padding: 12px 14px;
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    font-size: 12px;
-    color: {_TEXT_PRIMARY};
-    max-height: 220px;
-    overflow-y: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
-}}
-/* ── Buttons ─────────────────────────────────────────────────── */
-.btn-reset  {{ background: {_ACCENT_PURPLE} !important; color: #fff !important; border: none !important; border-radius: 8px !important; }}
-.btn-step   {{ background: {_ACCENT_BLUE}   !important; color: #fff !important; border: none !important; border-radius: 8px !important; }}
-.btn-state  {{ background: {_CARD_BG}       !important; color: {_TEXT_PRIMARY} !important; border: 1px solid {_BORDER} !important; border-radius: 8px !important; }}
-/* ── Legend dots ─────────────────────────────────────────────── */
-.legend {{ display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: {_TEXT_MUTED}; margin-top: 4px; }}
-.legend-dot {{ display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; }}
+.gr-box, .gr-panel {{ background: {_CARD_BG} !important; border: 1px solid {_BORDER} !important; }}
+.btn-reset  {{ background: {_ACCENT_PURPLE} !important; color: #fff !important; border: none !important; border-radius: 8px !important; font-weight: 600 !important; }}
+.btn-step   {{ background: {_ACCENT_BLUE}   !important; color: #fff !important; border: none !important; border-radius: 8px !important; font-weight: 600 !important; }}
+.btn-state  {{ background: {_CARD_BG2}      !important; color: {_TEXT_PRIMARY} !important; border: 1px solid {_BORDER} !important; border-radius: 8px !important; }}
+#accordis-left-col {{ align-self: flex-start !important; }}
 """
 
+# ── Shared inline style helpers ─────────────────────────────────────────────
 
-# ── Graph builder ──────────────────────────────────────────────────────────
+def _s(**kv: str) -> str:
+    return ";".join(f"{k.replace('_', '-')}:{v}" for k, v in kv.items())
+
+
+_SECTION_TITLE = _s(
+    font_size="10px", font_weight="700", letter_spacing="0.1em",
+    text_transform="uppercase", color=_TEXT_SECONDARY, margin_bottom="10px",
+    display="block",
+)
+_CHIP_BASE = _s(
+    display="inline-flex", flex_direction="column", gap="2px",
+    background=_DARK_BG, border=f"1px solid {_BORDER}",
+    border_radius="8px", padding="8px 14px", min_width="72px",
+)
+_LABEL_STYLE = _s(
+    font_size="9px", font_weight="700", letter_spacing="0.08em",
+    text_transform="uppercase", color=_TEXT_SECONDARY,
+)
+_ROW_STYLE = _s(display="flex", flex_wrap="wrap", gap="8px", margin_bottom="14px")
+
+
+# ── Graph ──────────────────────────────────────────────────────────────────
 
 def _ring_positions(n: int) -> List[tuple[float, float]]:
-    """Evenly-spaced positions on a unit circle."""
     return [
         (math.cos(2 * math.pi * i / n - math.pi / 2),
          math.sin(2 * math.pi * i / n - math.pi / 2))
@@ -120,43 +94,33 @@ def _ring_positions(n: int) -> List[tuple[float, float]]:
 
 
 def _build_node_graph(state: Optional[Dict[str, Any]]) -> "go.Figure":
-    """Return a Plotly figure from parsed state dict (or a placeholder)."""
     if not _PLOTLY_OK:
         fig = go.Figure()
         fig.add_annotation(text="plotly not installed", x=0.5, y=0.5, showarrow=False)
         return fig
 
-    # ── Parse node list from state ────────────────────────────────────────
     node_states: Dict[str, Any] = {}
     bfa_strategy = "none"
     step_num = 0
     curriculum = 1
-    n_nodes = 0
-    f_byzantine = 0
 
     if state:
         node_states  = state.get("node_states", {})
-        bfa_strategy = state.get("bfa_strategy", "none")
+        bfa_strategy = str(state.get("bfa_strategy", "none")).replace("BFAStrategy.", "")
         step_num     = state.get("step", 0)
         curriculum   = state.get("curriculum_level", 1)
-        n_nodes      = state.get("n_nodes", len(node_states))
-        f_byzantine  = state.get("f_byzantine", 0)
 
     if not node_states:
-        # Placeholder: show an instructional message inside the figure
         fig = go.Figure()
         fig.update_layout(
-            paper_bgcolor=_CARD_BG,
-            plot_bgcolor=_CARD_BG,
+            paper_bgcolor=_CARD_BG, plot_bgcolor=_CARD_BG,
             font=dict(color=_TEXT_MUTED),
-            xaxis=dict(visible=False),
-            yaxis=dict(visible=False),
+            xaxis=dict(visible=False), yaxis=dict(visible=False),
             margin=dict(l=0, r=0, t=0, b=0),
             annotations=[dict(
                 text="Click <b>Reset</b> to initialise the cluster",
                 x=0.5, y=0.5, xref="paper", yref="paper",
-                showarrow=False,
-                font=dict(size=15, color=_TEXT_MUTED),
+                showarrow=False, font=dict(size=15, color=_TEXT_SECONDARY),
             )],
         )
         return fig
@@ -164,86 +128,65 @@ def _build_node_graph(state: Optional[Dict[str, Any]]) -> "go.Figure":
     node_ids  = list(node_states.keys())
     positions = _ring_positions(len(node_ids))
 
-    # ── Edge traces (full mesh) ────────────────────────────────────────────
-    edge_x, edge_y = [], []
+    # Edges
+    honest_ex, honest_ey, byz_ex, byz_ey = [], [], [], []
     for i in range(len(node_ids)):
         for j in range(i + 1, len(node_ids)):
+            ns_i = node_states[node_ids[i]]
+            ns_j = node_states[node_ids[j]]
             x0, y0 = positions[i]
             x1, y1 = positions[j]
-            ns_i = node_states[node_ids[i]]
-            ns_j = node_states[node_ids[j]]
-            # Dim edges involving Byzantine nodes
             if ns_i.get("is_byzantine") or ns_j.get("is_byzantine"):
-                continue  # draw Byzantine edges separately below
-            edge_x += [x0, x1, None]
-            edge_y += [y0, y1, None]
-
-    byz_ex, byz_ey = [], []
-    for i in range(len(node_ids)):
-        for j in range(i + 1, len(node_ids)):
-            ns_i = node_states[node_ids[i]]
-            ns_j = node_states[node_ids[j]]
-            if ns_i.get("is_byzantine") or ns_j.get("is_byzantine"):
-                x0, y0 = positions[i]
-                x1, y1 = positions[j]
-                byz_ex += [x0, x1, None]
-                byz_ey += [y0, y1, None]
+                byz_ex += [x0, x1, None]; byz_ey += [y0, y1, None]
+            else:
+                honest_ex += [x0, x1, None]; honest_ey += [y0, y1, None]
 
     traces = []
-    if edge_x:
+    if honest_ex:
         traces.append(go.Scatter(
-            x=edge_x, y=edge_y, mode="lines",
-            line=dict(width=1.2, color="rgba(100,116,139,0.3)"),
+            x=honest_ex, y=honest_ey, mode="lines",
+            line=dict(width=1.4, color="rgba(88,166,255,0.15)"),
             hoverinfo="none", showlegend=False,
         ))
     if byz_ex:
         traces.append(go.Scatter(
             x=byz_ex, y=byz_ey, mode="lines",
-            line=dict(width=1, color="rgba(239,68,68,0.2)", dash="dot"),
+            line=dict(width=1, color="rgba(248,81,73,0.18)", dash="dot"),
             hoverinfo="none", showlegend=False,
         ))
 
-    # ── Node traces ────────────────────────────────────────────────────────
     node_x, node_y, node_colours, node_sizes = [], [], [], []
     node_symbols: List[str] = []
     hover_texts: List[str] = []
     node_labels: List[str] = []
+    border_colours: List[str] = []
 
     for idx, nid in enumerate(node_ids):
         ns   = node_states[nid]
         x, y = positions[idx]
-        node_x.append(x)
-        node_y.append(y)
+        node_x.append(x); node_y.append(y)
         node_labels.append(nid)
 
-        is_byz  = ns.get("is_byzantine", False)
-        role    = ns.get("current_role", "replica")
-        view    = ns.get("current_view", 0)
-        cfg     = ns.get("config", {})
+        is_byz = ns.get("is_byzantine", False)
+        role   = ns.get("current_role", "replica")
+        view   = ns.get("current_view", 0)
+        cfg    = ns.get("config", {})
         log_len = len(ns.get("committed_log", []))
 
         if is_byz:
-            colour = _BYZANTINE_COLOUR
-            symbol = "x"
-            size   = 22
+            colour, border, symbol, size = _BYZANTINE_COLOUR, "#7f2020", "x", 24
         elif role == "leader":
-            colour = _LEADER_COLOUR
-            symbol = "star"
-            size   = 28
+            colour, border, symbol, size = _LEADER_COLOUR, "#1e3a6e", "star", 32
         elif role == "candidate":
-            colour = _CANDIDATE_COLOUR
-            symbol = "diamond"
-            size   = 24
+            colour, border, symbol, size = _CANDIDATE_COLOUR, "#5a3e0a", "diamond", 26
         else:
-            colour = _REPLICA_COLOUR
-            symbol = "circle"
-            size   = 22
+            colour, border, symbol, size = _REPLICA_COLOUR, "#0d3320", "circle", 22
 
         node_colours.append(colour)
+        border_colours.append(border)
         node_symbols.append(symbol)
         node_sizes.append(size)
 
-        # ── Hover tooltip ────────────────────────────────────────────────
         vto  = cfg.get("view_timeout_ms",             "—")
         pd_  = cfg.get("pipeline_depth",              "—")
         rbs  = cfg.get("replication_batch_size",      "—")
@@ -253,8 +196,8 @@ def _build_node_graph(state: Optional[Dict[str, Any]]) -> "go.Figure":
         hover_texts.append(
             f"<b>{nid}</b><br>"
             f"Role: <b>{role_label}</b><br>"
-            f"View: {view} · Log: {log_len} blocks<br>"
-            f"──────────────────<br>"
+            f"View: {view}  ·  Committed: {log_len} blocks<br>"
+            f"──────────────────────<br>"
             f"view_timeout_ms: {vto}<br>"
             f"pipeline_depth: {pd_}<br>"
             f"replication_batch_size: {rbs}<br>"
@@ -266,65 +209,59 @@ def _build_node_graph(state: Optional[Dict[str, Any]]) -> "go.Figure":
         x=node_x, y=node_y,
         mode="markers+text",
         marker=dict(
-            color=node_colours,
-            size=node_sizes,
-            symbol=node_symbols,
-            line=dict(width=2, color=_CARD_BG),
+            color=node_colours, size=node_sizes, symbol=node_symbols,
+            line=dict(width=2, color=border_colours),
         ),
         text=node_labels,
         textposition="top center",
         textfont=dict(size=11, color=_TEXT_PRIMARY),
-        hovertext=hover_texts,
-        hoverinfo="text",
+        hovertext=hover_texts, hoverinfo="text",
         showlegend=False,
     ))
 
-    # ── Layout ─────────────────────────────────────────────────────────────
+    bfa_clean = bfa_strategy.replace("BFAStrategy.", "")
     fig = go.Figure(data=traces)
     fig.update_layout(
-        paper_bgcolor=_CARD_BG,
-        plot_bgcolor=_CARD_BG,
+        paper_bgcolor=_CARD_BG, plot_bgcolor=_CARD_BG,
         font=dict(color=_TEXT_PRIMARY, family="Inter, sans-serif"),
-        xaxis=dict(visible=False, range=[-1.45, 1.45]),
-        yaxis=dict(visible=False, range=[-1.45, 1.45], scaleanchor="x"),
-        margin=dict(l=10, r=10, t=30, b=10),
-        hoverlabel=dict(
-            bgcolor=_DARK_BG,
-            bordercolor=_BORDER,
-            font=dict(color=_TEXT_PRIMARY, size=12),
-        ),
+        xaxis=dict(visible=False, range=[-1.5, 1.5]),
+        yaxis=dict(visible=False, range=[-1.5, 1.5], scaleanchor="x"),
+        margin=dict(l=10, r=10, t=36, b=10),
+        hoverlabel=dict(bgcolor=_DARK_BG, bordercolor=_BORDER,
+                        font=dict(color=_TEXT_PRIMARY, size=12)),
         title=dict(
             text=(
                 f"<b>Cluster</b>  ·  Step {step_num}  ·  "
-                f"Level {curriculum}  ·  BFA: <i>{bfa_strategy}</i>"
+                f"Level {curriculum}  ·  BFA: <i>{bfa_clean}</i>"
             ),
-            font=dict(size=13, color=_TEXT_MUTED),
+            font=dict(size=13, color=_TEXT_SECONDARY),
             x=0.5, xanchor="center",
         ),
     )
     return fig
 
 
-# ── Metrics formatter ──────────────────────────────────────────────────────
+# ── Metrics panel ──────────────────────────────────────────────────────────
+
+def _chip(label: str, value: str, colour: str = _TEXT_PRIMARY, bg: str = _DARK_BG) -> str:
+    base = _s(
+        display="inline-flex", flex_direction="column", gap="2px",
+        background=bg, border=f"1px solid {_BORDER}",
+        border_radius="8px", padding="8px 14px", min_width="72px",
+    )
+    return (
+        f'<div style="{base}">'
+        f'<span style="{_LABEL_STYLE}">{label}</span>'
+        f'<span style="font-size:17px;font-weight:700;color:{colour};line-height:1.2">{value}</span>'
+        f'</div>'
+    )
+
 
 def _metrics_html(state: Optional[Dict[str, Any]], obs: Optional[Dict[str, Any]]) -> str:
-    """Return an HTML snippet with metric chips (all inline styles — no CSS class dependency)."""
-    _chip_base = (
-        f"display:inline-flex;flex-direction:column;gap:2px;"
-        f"background:{_DARK_BG};border:1px solid {_BORDER};"
-        f"border-radius:8px;padding:8px 14px;min-width:80px;"
-    )
-    _label_style = f"font-size:10px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:{_TEXT_MUTED};"
-    _section_style = (
-        f"font-size:11px;font-weight:600;letter-spacing:0.08em;"
-        f"text-transform:uppercase;color:{_TEXT_MUTED};"
-        f"margin-bottom:10px;"
-    )
-
     if not state:
         return (
-            f'<div style="{_section_style}">Metrics</div>'
-            f'<p style="color:{_TEXT_MUTED};font-size:13px;margin:0">No data — click Reset first.</p>'
+            f'<span style="{_SECTION_TITLE}">Live Metrics</span>'
+            f'<p style="color:{_TEXT_SECONDARY};font-size:13px;margin:0">No data — click Reset first.</p>'
         )
 
     step_num    = state.get("step", 0)
@@ -335,7 +272,7 @@ def _metrics_html(state: Optional[Dict[str, Any]], obs: Optional[Dict[str, Any]]
     vc          = state.get("view_change_count", 0)
     fin_txns    = state.get("finalized_txn_count", 0)
 
-    # Aggregate throughput from per-node observations
+    # Throughput from obs
     avg_tps = 0.0
     nodes_obs: Dict[str, Any] = {}
     if obs and isinstance(obs.get("nodes"), dict):
@@ -346,73 +283,296 @@ def _metrics_html(state: Optional[Dict[str, Any]], obs: Optional[Dict[str, Any]]
         tps_vals = [n.get("commit_throughput_tps", 0.0) for n in nodes_obs.values()]
         avg_tps = sum(tps_vals) / max(len(tps_vals), 1)
 
-    def chip(label: str, value: str, colour: str = _TEXT_PRIMARY) -> str:
-        return (
-            f'<div style="{_chip_base}">'
-            f'<span style="{_label_style}">{label}</span>'
-            f'<span style="font-size:16px;font-weight:700;color:{colour};line-height:1.2">{value}</span>'
-            f'</div>'
-        )
-
     bfa_colour = _ACCENT_RED if bfa not in ("none", "NONE") else _ACCENT_GREEN
     byz_colour = _ACCENT_RED if f_byzantine else _ACCENT_GREEN
     vc_colour  = _ACCENT_AMBER if vc else _TEXT_PRIMARY
 
-    row_style = f"display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;"
-
     chips = "".join([
-        chip("Step",           str(step_num)),
-        chip("Curriculum",     str(curriculum)),
-        chip("Nodes",          str(n_nodes)),
-        chip("Byzantine",      str(f_byzantine), byz_colour),
-        chip("BFA Strategy",   bfa,              bfa_colour),
-        chip("View Changes",   str(vc),          vc_colour),
-        chip("Finalized Txns", str(fin_txns),    _ACCENT_BLUE),
-        chip("Avg TPS",        f"{avg_tps:.2f}", _ACCENT_BLUE),
+        _chip("Step",           str(step_num)),
+        _chip("Curriculum",     str(curriculum), _ACCENT_CYAN),
+        _chip("Nodes",          str(n_nodes)),
+        _chip("Byzantine",      str(f_byzantine), byz_colour),
+        _chip("BFA Strategy",   bfa,              bfa_colour),
+        _chip("View Changes",   str(vc),          vc_colour),
+        _chip("Finalized Txns", str(fin_txns),    _ACCENT_BLUE),
+        _chip("Avg TPS",        f"{avg_tps:.2f}", _ACCENT_GREEN),
     ])
 
     return (
-        f'<div style="{_section_style}">Live Metrics</div>'
-        f'<div style="{row_style}">{chips}</div>'
+        f'<span style="{_SECTION_TITLE}">Live Metrics</span>'
+        f'<div style="{_ROW_STYLE}">{chips}</div>'
     )
+
+
+# ── Byzantine activity panel ───────────────────────────────────────────────
+
+def _byzantine_panel_html(
+    state: Optional[Dict[str, Any]],
+    obs: Optional[Dict[str, Any]],
+) -> str:
+    """
+    Shows Byzantine node visibility from the full AccordisState.
+
+    Why state, not obs?
+    ─────────────────────────────────────────────────────────────────────
+    Observations (reset/step return value) are *agent-scoped*: only honest
+    nodes appear there.  Byzantine nodes are deliberately excluded from the
+    observation space — partial observability is the whole point.
+
+    The AccordisState (server-side ground truth) stores a NodeState entry
+    for every node, including Byzantine ones.  That is what we surface here
+    so the *dashboard operator* can see what the adversary is doing, while
+    the *agent* still sees only its partial view.
+    """
+    title = f'<span style="{_SECTION_TITLE}">Byzantine Activity</span>'
+
+    if not state:
+        return (
+            title +
+            f'<p style="color:{_TEXT_SECONDARY};font-size:13px;margin:0">'
+            f'No data — click Reset first.</p>'
+        )
+
+    node_states: Dict[str, Any] = state.get("node_states", {})
+    bfa_strategy = str(state.get("bfa_strategy", "none")).replace("BFAStrategy.", "")
+    f_byzantine  = state.get("f_byzantine", 0)
+
+    byz_nodes = {nid: ns for nid, ns in node_states.items() if ns.get("is_byzantine")}
+
+    # Build per-honest-node suspicion map from obs
+    suspicion_counts: Dict[str, int] = {}  # byz_nid → how many honest nodes suspect it
+    nodes_obs: Dict[str, Any] = {}
+    if obs and isinstance(obs.get("nodes"), dict):
+        nodes_obs = obs["nodes"]
+    elif obs and isinstance(obs.get("observation"), dict):
+        nodes_obs = obs["observation"].get("nodes", {})
+
+    for hon_obs in nodes_obs.values():
+        for peer_id, suspected in hon_obs.get("suspected_byzantine", {}).items():
+            if suspected:
+                suspicion_counts[peer_id] = suspicion_counts.get(peer_id, 0) + 1
+
+    if f_byzantine == 0 or not byz_nodes:
+        bfa_col = _ACCENT_GREEN
+        badge = (
+            f'<span style="background:{_ACCENT_GREEN}22;color:{_ACCENT_GREEN};'
+            f'border:1px solid {_ACCENT_GREEN}44;border-radius:5px;'
+            f'padding:2px 8px;font-size:11px;font-weight:600">No adversary active</span>'
+        )
+        return title + badge
+
+    # BFA strategy badge
+    bfa_col = _ACCENT_RED if bfa_strategy not in ("none", "NONE") else _ACCENT_GREEN
+    strategy_badge = (
+        f'<span style="background:{bfa_col}22;color:{bfa_col};'
+        f'border:1px solid {bfa_col}44;border-radius:5px;'
+        f'padding:2px 8px;font-size:11px;font-weight:600;margin-bottom:10px;display:inline-block">'
+        f'Strategy: {bfa_strategy}</span>'
+    )
+
+    # Per-byzantine-node rows
+    _row_base = _s(
+        display="flex", align_items="center", justify_content="space_between",
+        gap="12px", background=_DARK_BG, border=f"1px solid {_BORDER}",
+        border_radius="8px", padding="8px 12px", margin_bottom="6px",
+        font_size="12px",
+    )
+    _tag_base = _s(
+        border_radius="4px", padding="2px 7px", font_size="10px",
+        font_weight="600", white_space="nowrap",
+    )
+
+    rows = ""
+    for nid, ns in byz_nodes.items():
+        view     = ns.get("current_view", 0)
+        log_len  = len(ns.get("committed_log", []))
+        suspects = suspicion_counts.get(nid, 0)
+        total_hon = len(nodes_obs) if nodes_obs else (state.get("n_nodes", 0) - f_byzantine)
+
+        sus_col = _ACCENT_AMBER if suspects > 0 else _TEXT_SECONDARY
+        sus_label = f"{suspects}/{total_hon} honest nodes suspect" if suspects else "Not yet suspected"
+
+        rows += (
+            f'<div style="{_row_base}">'
+            f'  <span style="color:{_ACCENT_RED};font-weight:700;font-family:monospace">{nid}</span>'
+            f'  <span style="color:{_TEXT_SECONDARY}">view <b style="color:{_TEXT_PRIMARY}">{view}</b></span>'
+            f'  <span style="color:{_TEXT_SECONDARY}">log <b style="color:{_TEXT_PRIMARY}">{log_len}</b></span>'
+            f'  <span style="{_tag_base}background:{sus_col}22;color:{sus_col};border:1px solid {sus_col}44">'
+            f'    {sus_label}</span>'
+            f'</div>'
+        )
+
+    return title + strategy_badge + f'<div style="margin-top:8px">{rows}</div>'
+
+
+# ── Honest-node table ──────────────────────────────────────────────────────
+
+def _honest_table_html(obs: Optional[Dict[str, Any]]) -> str:
+    title = f'<span style="{_SECTION_TITLE}">Honest Node Observations</span>'
+
+    nodes_obs: Dict[str, Any] = {}
+    if obs and isinstance(obs.get("nodes"), dict):
+        nodes_obs = obs["nodes"]
+    elif obs and isinstance(obs.get("observation"), dict):
+        nodes_obs = obs["observation"].get("nodes", {})
+
+    if not nodes_obs:
+        return (
+            title +
+            f'<p style="color:{_TEXT_SECONDARY};font-size:13px;margin:0">'
+            f'No observation data yet.</p>'
+        )
+
+    _th = _s(
+        padding="6px 10px", text_align="left", font_size="9px",
+        font_weight="700", letter_spacing="0.08em", text_transform="uppercase",
+        color=_TEXT_SECONDARY, border_bottom=f"1px solid {_BORDER}",
+        white_space="nowrap",
+    )
+    _td = _s(
+        padding="6px 10px", font_size="12px",
+        border_bottom=f"1px solid {_BORDER_LIGHT}", white_space="nowrap",
+    )
+    _table = _s(
+        width="100%", border_collapse="collapse",
+        background=_DARK_BG, border_radius="8px", overflow="hidden",
+    )
+
+    headers = ["Node", "Role", "View", "TPS", "Pipeline util", "QC misses", "View Δ (recent)", "Pending txns"]
+    thead = "".join(f'<th style="{_th}">{h}</th>' for h in headers)
+
+    rows = ""
+    for nid, n in nodes_obs.items():
+        role = n.get("current_role", "?")
+        view = n.get("current_view", "?")
+        tps  = n.get("commit_throughput_tps", 0.0)
+        pu   = n.get("pipeline_utilisation", 0.0)
+        qcm  = n.get("qc_formation_miss_streak", 0)
+        vc_r = n.get("view_change_count_recent", 0)
+        pend = n.get("pending_txn_count", 0)
+
+        role_col = _ACCENT_BLUE if role == "leader" else (_ACCENT_AMBER if role == "candidate" else _ACCENT_GREEN)
+        tps_col  = _ACCENT_GREEN if tps > 0.5 else (_ACCENT_AMBER if tps > 0.1 else _TEXT_SECONDARY)
+        vc_col   = _ACCENT_AMBER if vc_r > 0 else _TEXT_PRIMARY
+
+        rows += (
+            f'<tr>'
+            f'<td style="{_td}font-family:monospace;color:{_TEXT_PRIMARY}">{nid}</td>'
+            f'<td style="{_td}"><span style="color:{role_col};font-weight:600;text-transform:uppercase;font-size:10px">{role}</span></td>'
+            f'<td style="{_td}color:{_TEXT_SECONDARY}">{view}</td>'
+            f'<td style="{_td}color:{tps_col};font-weight:600">{tps:.2f}</td>'
+            f'<td style="{_td}color:{_TEXT_SECONDARY}">{pu:.1%}</td>'
+            f'<td style="{_td}color:{"#f85149" if qcm > 2 else _TEXT_PRIMARY}">{qcm}</td>'
+            f'<td style="{_td}color:{vc_col}">{vc_r}</td>'
+            f'<td style="{_td}color:{_TEXT_SECONDARY}">{pend}</td>'
+            f'</tr>'
+        )
+
+    table = (
+        f'<table style="{_table}">'
+        f'<thead><tr>{thead}</tr></thead>'
+        f'<tbody>{rows}</tbody>'
+        f'</table>'
+    )
+    return title + table
 
 
 # ── Log formatter ──────────────────────────────────────────────────────────
 
 def _fmt_log(operation: str, data: Any) -> str:
-    """Return a concise text summary for the activity log."""
     if isinstance(data, str):
-        return f"[{operation}] ERROR — {data}"
+        return f"[{operation.upper()}] ERROR — {data}"
     if not data:
-        return f"[{operation}] (no data)"
+        return f"[{operation.upper()}] (no data)"
 
-    lines = [f"[{operation}]"]
+    lines = [f"[{operation.upper()}]"]
 
     if operation == "reset":
-        obs = data.get("observation", data)
+        obs   = data.get("observation", data)
         nodes = obs.get("nodes", {}) if isinstance(obs, dict) else {}
-        lines.append(f"  nodes initialised: {list(nodes.keys()) or '—'}")
+        lines.append(f"  nodes: {list(nodes.keys()) or '—'}")
         lines.append(f"  done={data.get('done')}  reward={data.get('reward')}")
 
     elif operation == "step":
-        obs = data.get("observation", data)
+        obs   = data.get("observation", data)
         nodes = obs.get("nodes", {}) if isinstance(obs, dict) else {}
-        for nid, nobs in list(nodes.items())[:6]:
+        for nid, nobs in list(nodes.items())[:8]:
             role = nobs.get("current_role", "?")
             view = nobs.get("current_view", "?")
             tps  = nobs.get("commit_throughput_tps", 0.0)
             lines.append(f"  {nid}: role={role}  view={view}  tps={tps:.2f}")
-        if len(nodes) > 6:
-            lines.append(f"  … (+{len(nodes)-6} more nodes)")
+        if len(nodes) > 8:
+            lines.append(f"  … (+{len(nodes)-8} more)")
         lines.append(f"  done={data.get('done')}  reward={data.get('reward')}")
+        meta = data.get("metadata") or data.get("info") or {}
+        if meta:
+            bfa  = meta.get("bfa_strategy", "")
+            lv   = meta.get("liveness_rate", "")
+            lines.append(f"  bfa={bfa}  liveness_rate={lv}")
 
     elif operation == "get_state":
-        step = data.get("step", "?")
-        bfa  = data.get("bfa_strategy", "?")
-        fin  = data.get("finalized_txn_count", "?")
-        lines.append(f"  step={step}  bfa_strategy={bfa}  finalized_txns={fin}")
+        lines.append(f"  step={data.get('step','?')}  "
+                     f"bfa={data.get('bfa_strategy','?')}  "
+                     f"fin_txns={data.get('finalized_txn_count','?')}")
 
     return "\n".join(lines)
+
+
+# ── Header bar ─────────────────────────────────────────────────────────────
+
+def _header_html(state: Optional[Dict[str, Any]]) -> str:
+    if not state:
+        health_badge = (
+            f'<span style="background:{_ACCENT_AMBER}22;color:{_ACCENT_AMBER};'
+            f'border:1px solid {_ACCENT_AMBER}55;border-radius:6px;'
+            f'padding:3px 10px;font-size:11px;font-weight:600">IDLE</span>'
+        )
+        episode = "—"
+        step_info = ""
+    else:
+        bfa   = str(state.get("bfa_strategy", "none")).replace("BFAStrategy.", "")
+        step  = state.get("step", 0)
+        eid   = state.get("episode_id", "")[:8]
+        n     = state.get("n_nodes", 0)
+        f_byz = state.get("f_byzantine", 0)
+        vc    = state.get("view_change_count", 0)
+
+        if bfa not in ("none", "NONE") and f_byz:
+            health_col = _ACCENT_RED
+            health_lbl = "UNDER ATTACK"
+        elif vc > 3:
+            health_col = _ACCENT_AMBER
+            health_lbl = "UNSTABLE"
+        else:
+            health_col = _ACCENT_GREEN
+            health_lbl = "HEALTHY"
+
+        health_badge = (
+            f'<span style="background:{health_col}22;color:{health_col};'
+            f'border:1px solid {health_col}55;border-radius:6px;'
+            f'padding:3px 10px;font-size:11px;font-weight:600">{health_lbl}</span>'
+        )
+        episode  = eid
+        step_info = (
+            f'<span style="font-size:12px;color:{_TEXT_SECONDARY};margin-left:16px">'
+            f'step <b style="color:{_TEXT_PRIMARY}">{step}</b> · '
+            f'{n} nodes · {f_byz} Byzantine</span>'
+        )
+
+    return (
+        f'<div style="display:flex;align-items:center;justify-content:space-between;'
+        f'padding:14px 0 12px;border-bottom:1px solid {_BORDER};margin-bottom:16px">'
+        f'  <div>'
+        f'    <span style="font-size:22px;font-weight:800;color:{_TEXT_PRIMARY};letter-spacing:-0.5px">Accordis</span>'
+        f'    <span style="font-size:12px;color:{_TEXT_SECONDARY};margin-left:10px">BFT Consensus Dashboard</span>'
+        f'    {step_info}'
+        f'  </div>'
+        f'  <div style="display:flex;align-items:center;gap:12px">'
+        f'    {health_badge}'
+        f'    <span style="font-size:11px;color:{_TEXT_MUTED};font-family:monospace">ep: {episode}</span>'
+        f'  </div>'
+        f'</div>'
+    )
 
 
 # ── Main builder ───────────────────────────────────────────────────────────
@@ -425,26 +585,30 @@ def build_accordis_gradio_app(
     title: str,
     quick_start_md: str,
 ) -> gr.Blocks:
-    """
-    Returns a gr.Blocks that becomes the 'Custom' tab in the TabbedInterface.
+    """Returns a gr.Blocks that becomes the 'Custom' tab in the TabbedInterface."""
 
-    Layout
-    ──────
-    Left column  : cluster graph (Plotly) + legend
-    Right column : metrics strip + action buttons + activity log + state JSON
-    """
+    _shared: Dict[str, Any] = {
+        "state":    None,
+        "last_obs": None,
+        "log":      "Ready — click Reset to begin.",
+    }
 
-    # Shared in-memory state across callbacks (one env per server process)
-    _shared: Dict[str, Any] = {"state": None, "last_obs": None, "log": "Ready — click Reset to begin."}
+    # ── Callbacks ──────────────────────────────────────────────────────────
 
-    # ── Async helpers ──────────────────────────────────────────────────────
+    async def _do_reset(n_nodes: float, f_byzantine: float, pool_size: float):
+        n_nodes_i = max(1, int(n_nodes or 4))
+        f_byzantine_i = max(0, min(int(f_byzantine or 0), n_nodes_i - 1))
+        pool_size_i = max(1, int(pool_size or 1000))
 
-    async def _do_reset():
         try:
-            data = await web_manager.reset_environment()
+            reset_environment_payload = {
+                "n_nodes": n_nodes_i,
+                "f_byzantine": f_byzantine_i,
+                "pool_size": pool_size_i,
+            }
+            data = await web_manager.reset_environment(reset_environment_payload)
         except Exception as exc:
             data = str(exc)
-        # Refresh state after reset
         try:
             state = web_manager.get_state()
         except Exception:
@@ -456,9 +620,8 @@ def build_accordis_gradio_app(
 
     async def _do_step():
         if _shared["state"] is None:
-            _shared["log"] = "[step] Not started — click Reset first."
+            _shared["log"] = "[STEP] Not started — click Reset first."
             return _refresh_ui()
-        # Build a no-op action that keeps current configs unchanged
         state       = _shared["state"]
         node_states = state.get("node_states", {}) if state else {}
         nodes_action: Dict[str, Any] = {}
@@ -474,9 +637,8 @@ def build_accordis_gradio_app(
                 "equivocation_threshold":      cfg.get("equivocation_threshold",      5),
                 "vote_aggregation_timeout_ms": cfg.get("vote_aggregation_timeout_ms", 500),
             }
-        action_payload = {"nodes": nodes_action}
         try:
-            data = await web_manager.step_environment(action_payload)
+            data = await web_manager.step_environment({"nodes": nodes_action})
         except Exception as exc:
             data = str(exc)
         try:
@@ -497,108 +659,97 @@ def build_accordis_gradio_app(
         _shared["log"]   = _fmt_log("get_state", state)
         return _refresh_ui()
 
-    # ── UI refresh helper (returns values for all outputs) ─────────────────
-
     def _refresh_ui():
         state    = _shared["state"]
         last_obs = _shared["last_obs"]
-        fig      = _build_node_graph(state)
-        metrics  = _metrics_html(state, last_obs)
-        log_txt  = _shared["log"]
-        state_json = json.dumps(state, indent=2, default=str) if state else "null"
-        return fig, metrics, log_txt, state_json
-
-    # ── Gradio layout ──────────────────────────────────────────────────────
-
-    _section_title_style = (
-        f"font-size:11px;font-weight:600;letter-spacing:0.08em;"
-        f"text-transform:uppercase;color:{_TEXT_MUTED};margin-bottom:8px;"
-    )
-
-    with gr.Blocks(
-        title="Accordis — BFT Cluster Visualizer",
-        css=_CSS,
-    ) as demo:
-
-        gr.HTML(
-            f'<div style="padding:16px 0 8px;border-bottom:1px solid {_BORDER};margin-bottom:16px">'
-            f'<span style="font-size:20px;font-weight:700;color:{_TEXT_PRIMARY}">Accordis</span>'
-            f'<span style="font-size:13px;color:{_TEXT_MUTED};margin-left:12px">BFT Consensus Cluster Visualizer</span>'
-            f'</div>'
+        return (
+            _header_html(state),
+            _build_node_graph(state),
+            _metrics_html(state, last_obs),
+            _byzantine_panel_html(state, last_obs),
+            _shared["log"],
+            _honest_table_html(last_obs),
+            json.dumps(state, indent=2, default=str) if state else "null",
         )
 
-        # ── TOP ROW: graph (left) + controls (right) ───────────────────────
-        # The JSON accordion is kept OUTSIDE this row so it never shifts the graph.
+    # ── Layout ─────────────────────────────────────────────────────────────
+
+    with gr.Blocks(title="Accordis — BFT Dashboard", css=_CSS) as demo:
+
+        header_html = gr.HTML(value=_header_html(None))
+
         with gr.Row():
 
-            # LEFT — cluster topology, pinned to the top with align-self
-            with gr.Column(scale=3, min_width=360, elem_id="accordis-left-col"):
-                gr.HTML(f'<div style="{_section_title_style}">Cluster Topology</div>')
+            # LEFT — topology
+            with gr.Column(scale=3, min_width=380, elem_id="accordis-left-col"):
+                gr.HTML(f'<span style="{_SECTION_TITLE}">Cluster Topology</span>')
                 cluster_plot = gr.Plot(
                     value=_build_node_graph(None),
-                    label="",
-                    show_label=False,
-                    container=False,
+                    label="", show_label=False, container=False,
                 )
-                _legend_dot = (
-                    "display:inline-block;width:10px;height:10px;"
-                    "border-radius:50%;margin-right:5px;vertical-align:middle;"
-                )
+                _dot = "display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:middle;"
                 gr.HTML(
-                    f'<div style="display:flex;gap:18px;flex-wrap:wrap;'
-                    f'font-size:12px;color:{_TEXT_MUTED};margin-top:6px;padding-bottom:4px">'
-                    f'<span><span style="{_legend_dot}background:{_LEADER_COLOUR}"></span>Leader (★)</span>'
-                    f'<span><span style="{_legend_dot}background:{_REPLICA_COLOUR}"></span>Replica (●)</span>'
-                    f'<span><span style="{_legend_dot}background:{_BYZANTINE_COLOUR}"></span>Byzantine (✕)</span>'
-                    f'<span><span style="{_legend_dot}background:{_CANDIDATE_COLOUR}"></span>Candidate (◆)</span>'
+                    f'<div style="display:flex;gap:20px;flex-wrap:wrap;font-size:11px;'
+                    f'color:{_TEXT_SECONDARY};margin-top:6px">'
+                    f'<span><span style="{_dot}background:{_LEADER_COLOUR}"></span>Leader (★)</span>'
+                    f'<span><span style="{_dot}background:{_REPLICA_COLOUR}"></span>Replica (●)</span>'
+                    f'<span><span style="{_dot}background:{_BYZANTINE_COLOUR}"></span>Byzantine (✕)</span>'
+                    f'<span><span style="{_dot}background:{_CANDIDATE_COLOUR}"></span>Candidate (◆)</span>'
                     f'</div>'
                 )
 
-            # RIGHT — metrics + buttons + log (fixed height, no expanding content here)
-            with gr.Column(scale=2, min_width=280):
+            # RIGHT — controls & info
+            with gr.Column(scale=2, min_width=300):
+                metrics_html  = gr.HTML(value=_metrics_html(None, None))
+                byzantine_html = gr.HTML(value=_byzantine_panel_html(None, None))
 
-                metrics_html = gr.HTML(value=_metrics_html(None, None))
+                gr.HTML(f'<span style="{_SECTION_TITLE};margin-top:14px">Reset Configuration</span>')
+                with gr.Row():
+                    inp_n_nodes = gr.Number(value=4, precision=0, label="n_nodes")
+                    inp_f_byzantine = gr.Number(value=1, precision=0, label="f_byzantine")
+                    inp_pool_size = gr.Number(value=1000, precision=0, label="pool_size")
 
-                gr.HTML(f'<div style="{_section_title_style};margin-top:14px">Operations</div>')
+                gr.HTML(f'<span style="{_SECTION_TITLE};margin-top:14px">Operations</span>')
                 with gr.Row():
                     btn_reset = gr.Button("⟳  Reset",     elem_classes="btn-reset", size="sm")
                     btn_step  = gr.Button("▶  Step",      elem_classes="btn-step",  size="sm")
                     btn_state = gr.Button("◎  Get State", elem_classes="btn-state", size="sm")
 
-                gr.HTML(f'<div style="{_section_title_style};margin-top:14px">Activity Log</div>')
+                gr.HTML(f'<span style="{_SECTION_TITLE};margin-top:14px">Activity Log</span>')
                 log_box = gr.Textbox(
                     value="Ready — click Reset to begin.",
-                    label="",
-                    show_label=False,
-                    lines=7,
-                    max_lines=7,
-                    interactive=False,
-                    container=False,
+                    label="", show_label=False,
+                    lines=7, max_lines=7,
+                    interactive=False, container=False,
                 )
 
-        # ── BOTTOM ROW: full-width JSON (expanding this never touches the graph) ──
+        # BOTTOM — expanding panels
+        with gr.Row():
+            with gr.Column():
+                with gr.Accordion("Honest Node Observations", open=True):
+                    honest_table_html = gr.HTML(value=_honest_table_html(None))
+
         with gr.Row():
             with gr.Column():
                 with gr.Accordion("Full State JSON", open=False):
                     state_json_box = gr.Code(
-                        value="null",
-                        language="json",
-                        label="",
-                        show_label=False,
-                        interactive=False,
+                        value="null", language="json",
+                        label="", show_label=False, interactive=False,
                     )
 
-        # Pin the left column to the top so it doesn't stretch when right grows
-        gr.HTML(
-            "<style>"
-            "#accordis-left-col { align-self: flex-start !important; }"
-            "</style>"
+        # Pin left column
+        gr.HTML("<style>#accordis-left-col { align-self: flex-start !important; }</style>")
+
+        # Wire buttons
+        _outputs = [
+            header_html, cluster_plot, metrics_html,
+            byzantine_html, log_box, honest_table_html, state_json_box,
+        ]
+        btn_reset.click(
+            fn=_do_reset,
+            inputs=[inp_n_nodes, inp_f_byzantine, inp_pool_size],
+            outputs=_outputs
         )
-
-        # ── Wire buttons ───────────────────────────────────────────────────
-        _outputs = [cluster_plot, metrics_html, log_box, state_json_box]
-
-        btn_reset.click(fn=_do_reset,    inputs=[], outputs=_outputs)
         btn_step.click( fn=_do_step,     inputs=[], outputs=_outputs)
         btn_state.click(fn=_do_get_state,inputs=[], outputs=_outputs)
 

@@ -27,7 +27,7 @@ class OpenAIClient(BaseLLMClient):
 
     def __init__(self, model: str) -> None:
         from openai import AsyncOpenAI
-        self._BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
+        self._BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
         self._MODEL = model
         self._API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
         self._client = AsyncOpenAI(
