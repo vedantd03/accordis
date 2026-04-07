@@ -30,6 +30,7 @@ dependencies = [
     # "smolagents>=1.22.0,<2",
     "pip>=26.0.1",
     "pytest>=9.0.2",
+    "plotly>=5.0.0",
 ]
 
 [project.optional-dependencies]

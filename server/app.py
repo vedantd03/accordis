@@ -28,6 +28,7 @@ setup_logger()
 from accordis.models import MultiNodeAction, MultiNodeObservation
 from accordis.server.accordis_environment import AccordisEnvironment
 from accordis.server.adapters import create_adapter
+from accordis.server.gradio_ui import build_accordis_gradio_app
 from accordis.server.router import setup_router
 
 
@@ -44,6 +45,7 @@ app = create_app(
     MultiNodeObservation,
     env_name="accordis",
     max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions
+    gradio_builder=build_accordis_gradio_app,
 )
 
 # Mount the v1 API router (e.g. /baseline)

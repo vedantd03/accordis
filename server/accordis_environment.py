@@ -42,6 +42,7 @@ from accordis.server.oracle.verifier import CorrectnessOracle
 from accordis.server.rewards.reward_calculator import RewardCalculator
 from accordis.server.curriculum.manager import CurriculumManager
 from accordis.server.adapters import create_adapter
+from accordis.server.utils.logger import logger
 
 
 class AccordisEnvironment(Environment):
