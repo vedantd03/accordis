@@ -343,6 +343,10 @@ class AccordisEnvironment(Environment):
             self._episode_log.steps.append(self._snapshot_state(self._state))
             self._episode_log.rewards.append(reward)
 
+        if done:
+            self._state.episode_log = self._episode_log
+            logger.info(f"Episode terminated due to {_termination_reason}")
+
         info = {
             "step":               step,
             "liveness_rate":      liveness.liveness_rate,

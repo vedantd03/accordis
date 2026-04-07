@@ -186,6 +186,7 @@ class AccordisState(State):
     proposal_registry:   ProposalRegistry = Field(default_factory=ProposalRegistry)
     episode_txn_pool:    List[Transaction] = Field(default_factory=list)
     finalized_txn_count: int = 0  # txns with a confirmed QC; set by environment from adapter
+    episode_log:         Optional[EpisodeLog] = None  # populated by environment for rubric grading at the end
 
 
 class VerificationResult(BaseModel):

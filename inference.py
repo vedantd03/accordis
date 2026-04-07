@@ -4,9 +4,8 @@ Accordis Inference Script
 MANDATORY environment variables:
     ACCORDIS_ADAPTER   Adapter to use: "simulated" (default) or "librabft".
 
-LLM selection (LLMClientFactory, priority order):
-    OPENAI_API_KEY     → OpenAI gpt-4o
-    GEMINI_API_KEY     → Google gemini-1.5-pro
+LLM selection:
+    API_KEY / HF_TOKEN     → OpenAI compatible model
 
 Optional:
     ACCORDIS_TASKS      Task difficulty: "easy" (default), "medium", "hard".
@@ -43,9 +42,10 @@ import asyncio
 import argparse
 import textwrap
 from dotenv import load_dotenv
+load_dotenv()
 from typing import Dict, Optional
+from abc import ABC, abstractmethod
 
-from accordis.server.utils.llm_factory import BaseLLMClient, LLMClientFactory
 from accordis.models import (
     AccordisAction,
     AccordisObservation,
@@ -67,6 +67,38 @@ from accordis.server.utils.constants import (
 )
 
 IMAGE_NAME = os.getenv("IMAGE_NAME") # If you are using docker image 
+
+class HuggingFaceClient():
+    """OpenAI chat-completion client with Hugging Face model compatibility."""
+
+    def __init__(self, model: str) -> None:
+        from openai import AsyncOpenAI
+        self._BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+        self._MODEL = model
+        self._API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+        self._client = AsyncOpenAI(
+            base_url=self._BASE_URL,
+            api_key=self._API_KEY
+        )
+
+    async def complete(self, system: str, user: str) -> str:
+        resp = await self._client.chat.completions.create(
+            model=self._MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        return (resp.choices[0].message.content or "").strip()
+
+    async def close(self) -> None:
+        close = getattr(self._client, "close", None)
+        if not callable(close):
+            return
+
+        result = close()
+        if asyncio.iscoroutine(result):
+            await result
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -143,7 +175,7 @@ def _get_static_action(obs: MultiNodeObservation) -> MultiNodeAction:
 
 
 async def _get_llm_action(
-    llm: BaseLLMClient,
+    llm: HuggingFaceClient,
     step: int,
     obs: MultiNodeObservation,
     last_reward: float,
@@ -206,13 +238,13 @@ async def _run_single_task(
 
     if IMAGE_NAME is not None:
         logger.info(f"Using Docker image: {IMAGE_NAME}")
-        env = AccordisEnvironment.from_docker_image(image=IMAGE_NAME)
+        env = await AccordisEnvironment.from_docker_image(image=IMAGE_NAME)
     else:
         raise ValueError("IMAGE_NAME environment variable must be set to run the inference script.")
 
-    llm: Optional[BaseLLMClient] = None
+    llm: Optional[HuggingFaceClient] = None
     if provider != "static":
-        llm = LLMClientFactory.create(provider=provider, model=model)
+        llm = HuggingFaceClient(model=model)
 
     log_start(task_name, os.getenv("ACCORDIS_ADAPTER", "simulated"))
 
@@ -221,7 +253,8 @@ async def _run_single_task(
     score        = 0.0
 
     try:
-        obs: MultiNodeObservation = env.reset(**conds)
+        reset_result = await env.reset(**conds)
+        obs: MultiNodeObservation = reset_result.observation
         last_reward  = 0.0
 
         episode_max_steps = conds.get("max_steps", int(os.getenv("ACCORDIS_MAX_STEPS", "100")))
@@ -230,24 +263,27 @@ async def _run_single_task(
                 action = _get_static_action(obs)
             else:
                 action = await _get_llm_action(llm, step, obs, last_reward)
-            obs = env.step(action)
+            
+            step_result = await env.step(action)
 
-            reward       = float(obs.reward) if obs.reward is not None else 0.0
-            done         = bool(obs.done)
+            obs = step_result.observation
+            reward       = float(step_result.reward) if step_result.reward is not None else 0.0
+            done         = bool(step_result.done)
             last_reward  = reward
             total_reward += reward
             steps_taken   = step
 
-            log_step(step=step, reward=reward, total=total_reward, done=done)
+            log_step(step=step, action=action, reward=reward, total=total_reward, done=done)
 
             if done:
                 break
 
-        if env._episode_log:
-            score = task.grade(env._episode_log)
+        state = await env.state()
+        if state.episode_log is not None:
+            score = task.grade(state.episode_log)
 
     except Exception as exc:
-        logger.debug(f"[DEBUG] Episode error: {exc}", exc_info=True)
+        logger.error(f"[ERROR] Episode error: {exc}", exc_info=True)
 
     finally:
         if llm is not None:
@@ -256,9 +292,9 @@ async def _run_single_task(
             except Exception:
                 pass
         try:
-            env.close()
-        except Exception:
-            pass
+            await env.close()
+        except Exception as e:
+            logger.error(f"[DEBUG] env.close() error (container cleanup): {e}")
         log_end(steps=steps_taken, total_reward=total_reward, score=score)
 
     return {
@@ -278,7 +314,7 @@ async def inference(
 
     Args:
         tasks:    List of task names to run. Defaults to all three if None.
-        provider: Inference provider — "static", "openai", or "gemini".
+        provider: Inference provider — "static" or "openai".
         model:    LLM model name (required when provider is not "static").
 
     Returns:
@@ -301,12 +337,11 @@ async def inference(
     return inference_result
 
 if __name__ == "__main__":
-    load_dotenv()
     parser = argparse.ArgumentParser(description="Run Accordis baseline evaluation")
     parser.add_argument(
-        "--provider", default=os.getenv("PROVIDER", "openai"),
-        choices=["static", "openai", "gemini"],
-        help="LLM provider (default: openai)"
+        "--provider", default="huggingface",
+        choices=["static", "huggingface"],
+        help="LLM provider (default: huggingface)"
     )
     parser.add_argument(
         "--model", default=None,
@@ -317,11 +352,8 @@ if __name__ == "__main__":
         help="Difficulty levels to evaluate (default: all(easy,medium,hard). Ignored when --scenario is set."
     )
     args = parser.parse_args()
-    if args.provider in ["openai", "gemini"] and args.model is None:
-        if args.provider == "openai":
-            args.model = os.getenv("MODEL", "Qwen/Qwen2.5-72B-Instruct")
-        elif args.provider == "gemini":
-            args.model = os.getenv("MODEL", "gemini-3.1-flash-lite-preview")
+    if args.provider == "huggingface" and args.model is None:
+        args.model = os.getenv("MODEL", "Qwen/Qwen2.5-72B-Instruct")
     
     asyncio.run(inference(
         provider=args.provider,
