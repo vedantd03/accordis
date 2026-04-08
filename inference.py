@@ -44,9 +44,8 @@ import textwrap
 from dotenv import load_dotenv
 load_dotenv()
 from typing import Dict, Optional
-from abc import ABC, abstractmethod
 
-from accordis.models import (
+from models import (
     AccordisAction,
     AccordisObservation,
     MultiNodeAction,
@@ -55,10 +54,10 @@ from accordis.models import (
     STATIC_BASELINE_CONFIG,
 )
 
-from accordis.client import AccordisEnvironment
-from accordis.server.tasks.task_easy import EasyTask
-from accordis.server.tasks.task_medium import MediumTask
-from accordis.server.tasks.task_hard import HardTask
+from client import AccordisEnvironment
+from server.tasks.task_easy import EasyTask
+from server.tasks.task_medium import MediumTask
+from server.tasks.task_hard import HardTask
 
 SYSTEM_PROMPT = textwrap.dedent(
     """

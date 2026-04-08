@@ -301,8 +301,8 @@ uv run python inference.py --provider openai --tasks easy,medium,hard
 Examples:
 
 ```bash
-uv run python inference.py --provider openai --model Qwen/Qwen2.5-72B-Instruct --tasks easy
-uv run python inference.py --provider gemini --model gemini-2.0-flash-lite --tasks medium,hard
+uv run python inference.py
+uv run python inference.py --provider huggingface--model Qwen/Qwen2.5-72B-Instruct --tasks easy
 uv run python inference.py --provider static --tasks easy
 ```
 
@@ -348,10 +348,3 @@ openenv push
 openenv push --private
 openenv push --repo-id <namespace>/<repo>
 ```
-
-## Implementation Notes
-
-- The simulated Chained HotStuff adapter is the only implemented adapter. The `librabft` adapter path is declared but not implemented.
-- `max_concurrent_envs` is set to `1` in the server app.
-- Runtime logs are written under `outputs/logs/`.
-- `AccordisEnvironment` has zero imports from concrete adapter classes — the seam is `BaseConsensusAdapter` only.

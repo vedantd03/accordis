@@ -19,6 +19,8 @@ except Exception as e:  # pragma: no cover
         "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
     ) from e
 
+import os
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -44,7 +46,7 @@ app = create_app(
     MultiNodeAction,
     MultiNodeObservation,
     env_name="accordis",
-    max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions
+    max_concurrent_envs=int(os.getenv("MAX_CONCURRENT_ENVS", 1)),  # increase this number to allow more concurrent WebSocket sessions
     gradio_builder=build_accordis_gradio_app,
 )
 

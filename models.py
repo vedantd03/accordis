@@ -13,13 +13,14 @@ still exposing a partially observed interface to each training agent.
 
 from __future__ import annotations
 
+import json
 from enum import Enum
 from typing import Dict, List, Literal, Optional, Tuple, Any
 
 from openenv.core.env_server.types import Action, Observation, State
 from openenv.core.env_server.interfaces import Transform
 from openenv.core.rubrics import Rubric
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 NodeID = str
 
@@ -138,6 +139,23 @@ class AccordisAction(Action):
 class MultiNodeAction(Action):
     """Per-round joint action across all honest nodes."""
     nodes: Dict[NodeID, AccordisAction]
+
+    @field_validator("nodes", mode="before")
+    @classmethod
+    def _parse_nodes_json_string(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return {}
+            try:
+                value = json.loads(text)
+            except json.JSONDecodeError:
+                return value
+        if isinstance(value, dict) and "nodes" in value and len(value) == 1:
+            inner = value.get("nodes")
+            if isinstance(inner, dict):
+                return inner
+        return value
 
 
 class AccordisReward(BaseModel):
