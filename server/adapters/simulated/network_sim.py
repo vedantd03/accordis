@@ -13,6 +13,9 @@ from typing import Any, Dict, List, Optional
 
 from accordis.server.network.fault_profiles import FaultProfile, get_fault_profile
 
+# Must match VIEW_TICK_MS in hotstuff_sim — 1 logical tick = this many ms
+VIEW_TICK_MS: int = 50
+
 
 @dataclass
 class PendingMessage:
@@ -86,7 +89,8 @@ class NetworkSimulator:
         total_ms = sample + jitter
         total_ms = max(1.0, total_ms)
 
-        return max(1, int(round(total_ms)))
+        # Convert ms → ticks so that delivery_tick aligns with pacemaker timing
+        return max(1, int(round(total_ms / VIEW_TICK_MS)))
 
     def dispatch(
         self,

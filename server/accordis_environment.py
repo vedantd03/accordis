@@ -126,11 +126,11 @@ class AccordisEnvironment(Environment):
         for nid in honest_nodes:
             self._adapter.apply_config(nid, STATIC_BASELINE_CONFIG)
 
-        # Step 5
+        # Step 5 — use self._bfa_seed so step-0 and later steps draw from the same seed
         bfa_strategy = self._bfa.select_strategy(
             curriculum_level=level,
             step=0,
-            seed=bfa_strategy_seed,
+            seed=self._bfa_seed,
         )
 
         # Step 6
@@ -188,7 +188,9 @@ class AccordisEnvironment(Environment):
             episode_id=eid,
             curriculum_level=level,
             bfa_strategy=bfa_strategy,
-            bfa_strategy_seed=bfa_strategy_seed,
+            # Log the actual seed used (self._bfa_seed), not the raw parameter,
+            # so replay/audit can reproduce the exact same strategy sequence.
+            bfa_strategy_seed=self._bfa_seed,
         )
 
         # Step 8
@@ -259,7 +261,6 @@ class AccordisEnvironment(Environment):
             obs[nid] = self._transform.transform(raw, nid, step=step, current_config=config)
 
         # Step 7: Update AccordisState
-        view_change_total = 0
         for nid in honest_nodes:
             committed_log_dicts = self._adapter.get_committed_log(nid)
             blocks = [Block(**b) for b in committed_log_dicts]
@@ -269,10 +270,11 @@ class AccordisEnvironment(Environment):
                 if obs_n:
                     self._state.node_states[nid].current_view = obs_n.current_view
                     self._state.node_states[nid].current_role = obs_n.current_role
-                    view_change_total = max(view_change_total, obs_n.view_change_count_recent)
 
         self._state.step = step
-        self._state.view_change_count = view_change_total
+        # Use the cumulative (non-windowed) view change count so vc_delta in the
+        # reward calculator never saturates.
+        self._state.view_change_count = self._adapter.get_cumulative_view_changes()
         self._state.bfa_strategy = strategy
         self._state.finalized_txn_count = self._adapter.get_finalized_txn_count()
 
