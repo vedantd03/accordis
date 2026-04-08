@@ -11,13 +11,13 @@ from accordis.models import EpisodeLog, LeaderRotation
 from accordis.server.tasks.base_task import BaseTask
 from accordis.server.oracle.verifier import CorrectnessOracle
 
-_POOL_SIZE = 3_500   # drains in ~85 steps at default batch=64, ~10 steps at batch=512
+_POOL_SIZE = 1_800   # drains in ~85 steps at default batch=64, ~10 steps at batch=512
 _MAX_STEPS = 100     # agent budget for LLM cost reasons
 
 # throughput denominator: max possible batch per step (no Byzantine adjustment).
 # Byzantine disruption (~30% at level 6) naturally caps achievable throughput at ~0.65,
 # so this denominator punishes sub-optimal batch_size without a custom constant.
-_MAX_BATCH = 512.0
+_THROUGHPUT_DENOM = 170.0
 
 # vc_penalty denominator: generous enough to give partial credit for tuning
 # vote_aggregation_timeout_ms to handle SELECTIVE_DELAY (200–800ms delays at level 6).
@@ -32,13 +32,13 @@ class HardTask(BaseTask):
     Initial conditions:
       curriculum_level: 6–8
       n_nodes:          10
-      f_byzantine:      3 (maximum BFT tolerance at n=10)
+      f_byzantine:      2 (coordinated attack on leaders, causing 30% disruption at level 6)
       leader_rotation:  round_robin (level 6) → vrf / reputation_weighted (levels 7–8)
       network_profile:  FaultProfile per level (level 6: p99=300ms, packet_loss=5%)
       bfa_strategy:     LEADER_SUPPRESS + SELECTIVE_DELAY (level 6);
                         CASCADE_TIMING + EQUIVOCATION (level 7);
                         full coalition (level 8)
-      pool_size:        3_500 (drains within budget even at default batch=64)
+      pool_size:        2_500 (drains within budget even at default batch=64)
       max_steps:        100
 
     The two agent-sensitive levers at level 6:
@@ -48,7 +48,7 @@ class HardTask(BaseTask):
 
     Grader:
       liveness_rate    = finalized_txns / pool_size           (always 1.0 if pool drains)
-      throughput_score = min(1.0, txns_per_step / 512)        (rewards large batch_size)
+      throughput_score = min(1.0, txns_per_step / _THROUGHPUT_DENOM) (rewards large batch_size)
       vc_penalty       = max(0.0, 1 - view_change_count / 50) (rewards VAT tuning)
       score = 0.05 × liveness_rate
             + 0.75 × throughput_score
@@ -65,7 +65,7 @@ class HardTask(BaseTask):
     task_id           = "hard"
     curriculum_levels = [6, 7, 8]
     n_nodes           = 10
-    f_byzantine       = 3
+    f_byzantine       = 2
     leader_rotation   = LeaderRotation.ROUND_ROBIN
     max_steps         = _MAX_STEPS
 
@@ -93,7 +93,7 @@ class HardTask(BaseTask):
         """Score the episode.
 
         liveness_rate    = finalized_txns / pool_size           (always 1.0 if pool drains)
-        throughput_score = min(1.0, txns_per_step / 512)
+        throughput_score = min(1.0, txns_per_step / _THROUGHPUT_DENOM)
         vc_penalty       = max(0.0, 1 - view_change_count / 50)
         score = 0.05 × liveness_rate
               + 0.75 × throughput_score
@@ -112,7 +112,7 @@ class HardTask(BaseTask):
 
         steps = max(1, final_state.step)
         txns_per_step    = liveness.committed_count / steps
-        throughput_score = min(1.0, txns_per_step / _MAX_BATCH)
+        throughput_score = min(1.0, txns_per_step / _THROUGHPUT_DENOM)
 
         view_change_count = final_state.view_change_count
         vc_penalty = max(0.0, 1.0 - view_change_count / _VC_DENOM)

@@ -13,13 +13,14 @@ still exposing a partially observed interface to each training agent.
 
 from __future__ import annotations
 
+import json
 from enum import Enum
 from typing import Dict, List, Literal, Optional, Tuple, Any
 
 from openenv.core.env_server.types import Action, Observation, State
 from openenv.core.env_server.interfaces import Transform
 from openenv.core.rubrics import Rubric
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 NodeID = str
 
@@ -52,6 +53,7 @@ class BFAStrategy(str, Enum):
     CASCADE_TIMING  = "cascade_timing"
     RECOVERY_DELAY  = "recovery_delay"
     ADAPTIVE_MIRROR = "adaptive_mirror"
+    FORK            = "fork"
 
 
 class BFTConfig(BaseModel):
@@ -68,7 +70,11 @@ class BFTConfig(BaseModel):
 
 
 SAFE_BFT_TUNING_BOUNDS: Dict[str, Tuple[int, int]] = {
-    "view_timeout_ms":             (200, 10000),
+    # Upper bound 3000ms = 60 ticks (at VIEW_TICK_MS=50). Tasks run for at most
+    # 100 steps = 5000ms episode budget; capping at 3000ms guarantees that at
+    # least one view timeout can fire and trigger a NEW_VIEW within budget,
+    # which is required for liveness recovery from a Byzantine leader stall.
+    "view_timeout_ms":             (200, 3000),
     "pipeline_depth":              (1, 8),
     "replication_batch_size":      (1, 512),
     "equivocation_threshold":      (1, 15),
@@ -91,6 +97,11 @@ class AccordisObservation(Observation):
     per_phase_latency_p99:    Dict[str, float] = Field(default_factory=dict)
     qc_formation_miss_streak: int = 0
     view_change_count_recent: int = 0
+    # Wall-clock-equivalent ms since this node last started its current view.
+    # Compare directly against current_config.view_timeout_ms — if view_stuck_ms
+    # is approaching view_timeout_ms with qc_formation_miss_streak rising, the
+    # current leader is unresponsive and the agent should lower view_timeout_ms.
+    view_stuck_ms:            int = 0
 
     equivocation_miss_streak:  Dict[NodeID, int]   = Field(default_factory=dict)
     message_arrival_variance:  Dict[NodeID, float] = Field(default_factory=dict)
@@ -129,6 +140,23 @@ class MultiNodeAction(Action):
     """Per-round joint action across all honest nodes."""
     nodes: Dict[NodeID, AccordisAction]
 
+    @field_validator("nodes", mode="before")
+    @classmethod
+    def _parse_nodes_json_string(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return {}
+            try:
+                value = json.loads(text)
+            except json.JSONDecodeError:
+                return value
+        if isinstance(value, dict) and "nodes" in value and len(value) == 1:
+            inner = value.get("nodes")
+            if isinstance(inner, dict):
+                return inner
+        return value
+
 
 class AccordisReward(BaseModel):
     """
@@ -155,6 +183,7 @@ class Transaction(BaseModel):
 class Block(BaseModel):
     slot:         int
     hash:         str
+    parent_hash:  str = "genesis"
     proposer_id:  NodeID
     transactions: List[Transaction] = Field(default_factory=list)
 
@@ -186,6 +215,7 @@ class AccordisState(State):
     proposal_registry:   ProposalRegistry = Field(default_factory=ProposalRegistry)
     episode_txn_pool:    List[Transaction] = Field(default_factory=list)
     finalized_txn_count: int = 0  # txns with a confirmed QC; set by environment from adapter
+    episode_log:         Optional[EpisodeLog] = None  # populated by environment for rubric grading at the end
 
 
 class VerificationResult(BaseModel):
@@ -256,6 +286,7 @@ class AccordisTransform(Transform):
             per_phase_latency_p99={k: float(v) for k, v in p99_raw.items()},
             qc_formation_miss_streak=raw_metrics.get("qc_miss_streak", 0),
             view_change_count_recent=raw_metrics.get("view_changes_last_50", 0),
+            view_stuck_ms=int(raw_metrics.get("view_stuck_ms", 0)),
             equivocation_miss_streak={k: int(v) for k, v in raw_metrics.get("equivocation_counts", {}).items()},
             message_arrival_variance={k: float(v) for k, v in raw_metrics.get("inter_message_variance", {}).items()},
             suspected_byzantine={k: bool(v) for k, v in raw_metrics.get("suspected_peers", {}).items()},

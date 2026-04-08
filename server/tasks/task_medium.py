@@ -20,7 +20,7 @@ class MediumTask(BaseTask):
       leader_rotation:  round_robin
       network_profile:  FaultProfile per level
       bfa_strategy:     SELECTIVE_DELAY / EQUIVOCATION / ADAPTIVE_MIRROR
-      max_steps:        70
+      max_steps:        100
 
     Success criteria:
       liveness_rate >= 0.80, fast_leader_recovery >= 1, no oracle violations
@@ -38,7 +38,7 @@ class MediumTask(BaseTask):
     n_nodes           = 7
     f_byzantine       = 2
     leader_rotation   = LeaderRotation.ROUND_ROBIN
-    max_steps         = 70
+    max_steps         = 100
 
     def __init__(self, curriculum_level: int = 3) -> None:
         self.curriculum_levels = [curriculum_level]

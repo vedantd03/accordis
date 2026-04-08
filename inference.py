@@ -4,9 +4,8 @@ Accordis Inference Script
 MANDATORY environment variables:
     ACCORDIS_ADAPTER   Adapter to use: "simulated" (default) or "librabft".
 
-LLM selection (LLMClientFactory, priority order):
-    OPENAI_API_KEY     → OpenAI gpt-4o
-    GEMINI_API_KEY     → Google gemini-1.5-pro
+LLM selection:
+    API_KEY / HF_TOKEN     → OpenAI compatible model
 
 Optional:
     ACCORDIS_TASKS      Task difficulty: "easy" (default), "medium", "hard".
@@ -43,10 +42,10 @@ import asyncio
 import argparse
 import textwrap
 from dotenv import load_dotenv
+load_dotenv()
 from typing import Dict, Optional
 
-from accordis.server.utils.llm_factory import BaseLLMClient, LLMClientFactory
-from accordis.models import (
+from models import (
     AccordisAction,
     AccordisObservation,
     MultiNodeAction,
@@ -54,33 +53,191 @@ from accordis.models import (
     NodeID,
     STATIC_BASELINE_CONFIG,
 )
-# from accordis.server.accordis_environment import AccordisEnvironment
-from accordis.client import AccordisEnvironment
-from accordis.server.adapters import create_adapter
-from accordis.server.tasks.task_easy import EasyTask
-from accordis.server.tasks.task_medium import MediumTask
-from accordis.server.tasks.task_hard import HardTask
 
-from accordis.server.utils.logger import logger
-from accordis.server.utils.constants import (
-    SYSTEM_PROMPT
-)
+from client import AccordisEnvironment
+from server.tasks.task_easy import EasyTask
+from server.tasks.task_medium import MediumTask
+from server.tasks.task_hard import HardTask
+
+SYSTEM_PROMPT = textwrap.dedent(
+    """
+    You are a control policy that tunes Byzantine Fault-Tolerant (BFT) consensus
+    parameters for a cluster of honest nodes. At each step you receive JSON
+    observations for every honest node and must return a JSON config for each
+    node. Your goal: maximise transaction throughput, keep view changes low,
+    and stay stable.
+
+    ════════════════════════════════════════════════════════════════════════════
+    FIRST PRINCIPLE — STABILITY BEATS CLEVERNESS
+    ════════════════════════════════════════════════════════════════════════════
+    Oscillating parameters step-to-step DESTROYS throughput. The cluster needs
+    several consecutive steps with the SAME config to build a commit pipeline.
+    Default behaviour: REPEAT THE PREVIOUS STEP'S CONFIG. Only change a value
+    when a specific decision rule below tells you to. Never change more than
+    TWO parameters in a single step.
+
+    ════════════════════════════════════════════════════════════════════════════
+    DEFAULT STARTING CONFIG (use this on step 0 for every node)
+    ════════════════════════════════════════════════════════════════════════════
+      view_timeout_ms             = 1000
+      pipeline_depth              = 4
+      replication_batch_size      = 256
+      equivocation_threshold      = 5
+      vote_aggregation_timeout_ms = 800
+
+    These defaults are SAFE under both clean and adversarial conditions —
+    start here on step 0 and only adjust based on the rules below.
+
+    ════════════════════════════════════════════════════════════════════════════
+    TIMING MODEL — INTERNALISE THIS
+    ════════════════════════════════════════════════════════════════════════════
+    1 environment step ≈ 50 ms of simulated wall-clock time. Episodes have a
+    bounded step budget. view_timeout_ms is the wall-clock time the cluster
+    waits for a leader before triggering a view change. If view_timeout_ms
+    is set close to the remaining step budget, NO view change can fire and
+    a Byzantine leader stall deadlocks the rest of the episode.
+
+    HARD CEILING: never set view_timeout_ms above 1500 ms. The bound allows
+    up to 3000 ms but using it is almost always a mistake — it leaves no
+    room for the pacemaker to recover from an unresponsive leader.
+
+    view_stuck_ms reports how long THIS NODE has been waiting in its current
+    view. It is in the same unit as view_timeout_ms — compare them directly.
+
+    ════════════════════════════════════════════════════════════════════════════
+    DECISION RULES — apply in this order, top to bottom, at most one fires
+    ════════════════════════════════════════════════════════════════════════════
+
+    RULE 1 — LEADER STALL (highest priority)
+      IF any node has view_stuck_ms > 0.6 × view_timeout_ms
+         AND qc_miss_streak > 5
+      THEN halve view_timeout_ms (floor at 400 ms) on EVERY node.
+      WHY: the current leader is unresponsive; rotating faster lets the
+      cluster pick a non-Byzantine leader.
+
+    RULE 2 — DELAY ATTACK
+      IF qc_miss_streak ≥ 3 on any node
+         AND view_stuck_ms is NOT growing fast (no leader stall)
+      THEN raise vote_aggregation_timeout_ms by 200 ms (cap at 1000) on
+      EVERY node. Do NOT touch view_timeout_ms.
+      WHY: the leader is alive but votes are arriving late under
+      SELECTIVE_DELAY / ADAPTIVE_MIRROR. Bigger vote window = more QCs.
+
+    RULE 3 — EQUIVOCATION DETECTED
+      IF any peer in suspected_byzantine is true
+      THEN keep replication_batch_size ≥ 128, and lower equivocation_threshold
+      by 1 (floor at 2). Do NOT lower batch_size below 128 even under attack.
+      WHY: small batches throttle throughput; the right defence is to detect
+      attackers earlier, not to ship less data per round.
+
+    RULE 4 — THROUGHPUT RAMP (when no rule above fired)
+      IF cluster commit_tps is stable and > 0
+         AND no rule above fired
+      THEN raise replication_batch_size by 64 (cap at 512) on EVERY node.
+      WHY: in a healthy cluster the only way to drain the pool faster is to
+      ship more txns per block.
+
+    RULE 5 — DEFAULT
+      IF none of the above fired, REPEAT the previous step's config exactly.
+      Stability is the default action, not a fallback.
+
+    ════════════════════════════════════════════════════════════════════════════
+    HARD CONSTRAINTS — NEVER VIOLATE
+    ════════════════════════════════════════════════════════════════════════════
+    - replication_batch_size      ≥ 64    (lower values throttle throughput)
+    - vote_aggregation_timeout_ms < view_timeout_ms / 2   (env will clamp)
+    - view_timeout_ms             ≤ 1500  (soft cap; bound allows 3000 but don't)
+    - Apply the SAME config to every node unless a node-specific rule fires
+      (no current rule is node-specific — use uniform configs)
+
+    ════════════════════════════════════════════════════════════════════════════
+    PARAMETER RANGES (env clamps to these)
+    ════════════════════════════════════════════════════════════════════════════
+      view_timeout_ms             : 200 – 3000   (target ≤ 1500)
+      pipeline_depth              : 1   – 8      (target 4)
+      replication_batch_size      : 1   – 512    (target 256–512)
+      equivocation_threshold      : 1   – 15     (target 3–5)
+      vote_aggregation_timeout_ms : 50  – 1000   (target 600–1000, must be < view_timeout_ms / 2)
+
+    ════════════════════════════════════════════════════════════════════════════
+    OBSERVATION FORMAT
+    ════════════════════════════════════════════════════════════════════════════
+    Each step's observation is a JSON object with two top-level keys:
+      - "cluster_min_pending": int — minimum pending_txns across all honest
+        nodes. The episode is close to ending when this approaches 0.
+      - "nodes": object keyed by node_id, each containing local metrics:
+        role, view, commit_tps, pending_txns, pipeline_utilisation,
+        qc_miss_streak, view_changes_recent, view_stuck_ms,
+        suspected_byzantine, current_config.
+
+    PARTIAL OBSERVABILITY: nodes' pending_txns values diverge because QC
+    messages propagate with latency. Use cluster_min_pending as the
+    cluster-wide progress signal. The leader has the freshest view.
+
+    ════════════════════════════════════════════════════════════════════════════
+    RESPONSE FORMAT
+    ════════════════════════════════════════════════════════════════════════════
+    Return a FLAT JSON object keyed by node_id — do NOT nest under "nodes"
+    or any other wrapper. Include EVERY node_id present in the observation.
+    Respond with ONLY valid JSON — no prose, no code fences, no markdown.
+
+    Example (4-node cluster, step 0 with the default config):
+    {
+      "node_0": {"view_timeout_ms": 1000, "pipeline_depth": 4, "replication_batch_size": 256, "equivocation_threshold": 5, "vote_aggregation_timeout_ms": 800},
+      "node_1": {"view_timeout_ms": 1000, "pipeline_depth": 4, "replication_batch_size": 256, "equivocation_threshold": 5, "vote_aggregation_timeout_ms": 800},
+      "node_2": {"view_timeout_ms": 1000, "pipeline_depth": 4, "replication_batch_size": 256, "equivocation_threshold": 5, "vote_aggregation_timeout_ms": 800},
+      "node_3": {"view_timeout_ms": 1000, "pipeline_depth": 4, "replication_batch_size": 256, "equivocation_threshold": 5, "vote_aggregation_timeout_ms": 800}
+    }
+    """
+).strip()
 
 IMAGE_NAME = os.getenv("IMAGE_NAME") # If you are using docker image 
+
+class HuggingFaceClient():
+    """OpenAI chat-completion client with Hugging Face model compatibility."""
+
+    def __init__(self, model: str) -> None:
+        from openai import AsyncOpenAI
+        self._BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+        self._MODEL = model
+        self._API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+        self._client = AsyncOpenAI(
+            base_url=self._BASE_URL,
+            api_key=self._API_KEY
+        )
+
+    async def complete(self, system: str, user: str) -> str:
+        resp = await self._client.chat.completions.create(
+            model=self._MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        return (resp.choices[0].message.content or "").strip()
+
+    async def close(self) -> None:
+        close = getattr(self._client, "close", None)
+        if not callable(close):
+            return
+
+        result = close()
+        if asyncio.iscoroutine(result):
+            await result
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
 def log_start(task: str, adapter: str) -> None:
-    logger.info(f"[START] task={task} adapter={adapter}")
+    print(f"[START] task={task} adapter={adapter}")
 
 
-def log_step(step: int, action: any, reward: float, total: float, done: bool) -> None:
-    logger.info(
-        f"[STEP]  step={step} action={action} reward={reward:.2f} total={total:.1f} done={done}"
+def log_step(step: int, action: any, obs: any, reward: float, total: float, done: bool) -> None:
+    print(
+        f"[STEP]  step={step} action={action} observation={obs} reward={reward:.2f} total={total:.1f} done={done}"
     )
 
 def log_end(steps: int, total_reward: float, score: float) -> None:
-    logger.info(
+    print(
         f"[END]   steps={steps} total_reward={total_reward:.1f} score={score:.2f}"
     )
 
@@ -111,6 +268,7 @@ def _obs_to_dict(obs_nodes: Dict[NodeID, AccordisObservation]) -> str:
             "pipeline_utilisation":   round(o.pipeline_utilisation, 2),
             "qc_miss_streak":         o.qc_formation_miss_streak,
             "view_changes_recent":    o.view_change_count_recent,
+            "view_stuck_ms":          o.view_stuck_ms,
             "suspected_byzantine":    o.suspected_byzantine,
             "current_config": {
                 "view_timeout_ms":             o.current_config.view_timeout_ms,
@@ -143,7 +301,7 @@ def _get_static_action(obs: MultiNodeObservation) -> MultiNodeAction:
 
 
 async def _get_llm_action(
-    llm: BaseLLMClient,
+    llm: HuggingFaceClient,
     step: int,
     obs: MultiNodeObservation,
     last_reward: float,
@@ -167,7 +325,7 @@ async def _get_llm_action(
         text = await llm.complete(SYSTEM_PROMPT, user_prompt)
         raw_configs = json.loads(text)
     except Exception as exc:
-        logger.debug(f"[DEBUG] LLM request or JSON parse failed: {exc}", exc_info=True)
+        print(f"[DEBUG] LLM request or JSON parse failed: {exc}")
 
     node_actions: Dict[NodeID, AccordisAction] = {}
     for nid in node_ids:
@@ -205,14 +363,14 @@ async def _run_single_task(
     conds = task.get_initial_conditions()
 
     if IMAGE_NAME is not None:
-        logger.info(f"Using Docker image: {IMAGE_NAME}")
-        env = AccordisEnvironment.from_docker_image(image=IMAGE_NAME)
+        print(f"Using Docker image: {IMAGE_NAME}")
+        env = await AccordisEnvironment.from_docker_image(image=IMAGE_NAME)
     else:
         raise ValueError("IMAGE_NAME environment variable must be set to run the inference script.")
 
-    llm: Optional[BaseLLMClient] = None
+    llm: Optional[HuggingFaceClient] = None
     if provider != "static":
-        llm = LLMClientFactory.create(provider=provider, model=model)
+        llm = HuggingFaceClient(model=model)
 
     log_start(task_name, os.getenv("ACCORDIS_ADAPTER", "simulated"))
 
@@ -221,7 +379,8 @@ async def _run_single_task(
     score        = 0.0
 
     try:
-        obs: MultiNodeObservation = env.reset(**conds)
+        reset_result = await env.reset(**conds)
+        obs: MultiNodeObservation = reset_result.observation
         last_reward  = 0.0
 
         episode_max_steps = conds.get("max_steps", int(os.getenv("ACCORDIS_MAX_STEPS", "100")))
@@ -230,24 +389,27 @@ async def _run_single_task(
                 action = _get_static_action(obs)
             else:
                 action = await _get_llm_action(llm, step, obs, last_reward)
-            obs = env.step(action)
+            
+            step_result = await env.step(action)
 
-            reward       = float(obs.reward) if obs.reward is not None else 0.0
-            done         = bool(obs.done)
+            obs = step_result.observation
+            reward       = float(step_result.reward) if step_result.reward is not None else 0.0
+            done         = bool(step_result.done)
             last_reward  = reward
             total_reward += reward
             steps_taken   = step
 
-            log_step(step=step, reward=reward, total=total_reward, done=done)
+            log_step(step=step, action=action, obs=obs, reward=reward, total=total_reward, done=done)
 
             if done:
                 break
 
-        if env._episode_log:
-            score = task.grade(env._episode_log)
+        state = await env.state()
+        if state.episode_log is not None:
+            score = task.grade(state.episode_log)
 
     except Exception as exc:
-        logger.debug(f"[DEBUG] Episode error: {exc}", exc_info=True)
+        print(f"[ERROR] Episode error: {exc}")
 
     finally:
         if llm is not None:
@@ -256,9 +418,9 @@ async def _run_single_task(
             except Exception:
                 pass
         try:
-            env.close()
-        except Exception:
-            pass
+            await env.close()
+        except Exception as e:
+            print(f"[DEBUG] env.close() error (container cleanup): {e}")
         log_end(steps=steps_taken, total_reward=total_reward, score=score)
 
     return {
@@ -278,7 +440,7 @@ async def inference(
 
     Args:
         tasks:    List of task names to run. Defaults to all three if None.
-        provider: Inference provider — "static", "openai", or "gemini".
+        provider: Inference provider — "static" or "openai".
         model:    LLM model name (required when provider is not "static").
 
     Returns:
@@ -297,16 +459,15 @@ async def inference(
         "tasks":    tasks,
         "data":     results,
     }
-    logger.info(f"Baseline result: {json.dumps(inference_result, indent=2)}")
+    print(f"Baseline result: {json.dumps(inference_result, indent=2)}")
     return inference_result
 
 if __name__ == "__main__":
-    load_dotenv()
     parser = argparse.ArgumentParser(description="Run Accordis baseline evaluation")
     parser.add_argument(
-        "--provider", default=os.getenv("PROVIDER", "openai"),
-        choices=["static", "openai", "gemini"],
-        help="LLM provider (default: openai)"
+        "--provider", default="huggingface",
+        choices=["static", "huggingface"],
+        help="LLM provider (default: huggingface)"
     )
     parser.add_argument(
         "--model", default=None,
@@ -317,11 +478,8 @@ if __name__ == "__main__":
         help="Difficulty levels to evaluate (default: all(easy,medium,hard). Ignored when --scenario is set."
     )
     args = parser.parse_args()
-    if args.provider in ["openai", "gemini"] and args.model is None:
-        if args.provider == "openai":
-            args.model = os.getenv("MODEL", "Qwen/Qwen2.5-72B-Instruct")
-        elif args.provider == "gemini":
-            args.model = os.getenv("MODEL", "gemini-3.1-flash-lite-preview")
+    if args.provider == "huggingface" and args.model is None:
+        args.model = os.getenv("MODEL", "Qwen/Qwen2.5-72B-Instruct")
     
     asyncio.run(inference(
         provider=args.provider,

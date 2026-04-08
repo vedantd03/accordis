@@ -81,7 +81,10 @@ class BaseConsensusAdapter(ABC):
           role, current_view, phase_latency_p50, phase_latency_p99,
           qc_miss_streak, view_changes_last_50, equivocation_counts,
           inter_message_variance, suspected_peers, committed_tps,
-          pending_count, pipeline_utilisation
+          pending_count, pipeline_utilisation, view_stuck_ms
+        view_stuck_ms is the ms-equivalent time the node has been waiting in
+        its current view (resets to 0 on a successful view advance). It is
+        directly comparable to current_config.view_timeout_ms.
         Byzantine node IDs must never be passed to this method.
         """
         ...
@@ -101,16 +104,24 @@ class BaseConsensusAdapter(ABC):
 
     @abstractmethod
     def get_finalized_txn_count(self) -> int:
-        """Return the number of transactions for which a QC has been formed.
-        This is the authoritative finality signal — independent of per-node
-        propagation lag. A transaction counts the moment 2f+1 votes produced
-        a QC, before replicas have necessarily delivered it.
+        """Return the number of transactions durably committed by the 3-chain rule.
+        A transaction is counted only once a block containing it is committed via
+        _commit_chain_up_to(), i.e., when b3 → b2 → b1 are all consecutive views.
+        This aligns with the oracle's committed_log and prevents overstating progress.
         """
         ...
 
     @abstractmethod
     def get_byzantine_nodes(self) -> List[NodeID]:
         """Return the current list of Byzantine node IDs."""
+        ...
+
+    @abstractmethod
+    def get_cumulative_view_changes(self) -> int:
+        """Return the cumulative (non-windowed) number of view changes across the cluster.
+        Uses the maximum view_change_count across all honest nodes, which approximates
+        the total protocol-level view changes without saturating at any window size.
+        """
         ...
 
     # ── Byzantine Injection ──────────────────────────────────────────────────

@@ -18,6 +18,9 @@ import asyncio
 from typing import Any, Dict, List, Optional
 
 import gradio as gr
+from accordis.server.tasks.task_easy import EasyTask
+from accordis.server.tasks.task_medium import MediumTask
+from accordis.server.tasks.task_hard import HardTask
 
 try:
     import plotly.graph_objects as go
@@ -479,6 +482,146 @@ def _honest_table_html(obs: Optional[Dict[str, Any]]) -> str:
 
 # ── Log formatter ──────────────────────────────────────────────────────────
 
+_ACTION_HEADERS = [
+    "Node",
+    "view_timeout_ms",
+    "pipeline_depth",
+    "replication_batch_size",
+    "equivocation_threshold",
+    "vote_aggregation_timeout_ms",
+]
+
+
+def _action_rows_from_state(state: Optional[Dict[str, Any]]) -> List[List[Any]]:
+    if not state:
+        return []
+
+    node_states: Dict[str, Any] = state.get("node_states", {})
+    rows: List[List[Any]] = []
+    for nid, ns in node_states.items():
+        if ns.get("is_byzantine"):
+            continue
+        cfg = ns.get("config", {})
+        rows.append([
+            nid,
+            cfg.get("view_timeout_ms", 1000),
+            cfg.get("pipeline_depth", 2),
+            cfg.get("replication_batch_size", 64),
+            cfg.get("equivocation_threshold", 5),
+            cfg.get("vote_aggregation_timeout_ms", 500),
+        ])
+
+    rows.sort(key=lambda row: row[0])
+    return rows
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        if value in (None, ""):
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _action_payload_from_rows(rows: Any) -> Dict[str, Any]:
+    nodes_action: Dict[str, Any] = {}
+    if not isinstance(rows, list):
+        return {"nodes": nodes_action}
+
+    for row in rows:
+        if not isinstance(row, list) or len(row) < len(_ACTION_HEADERS):
+            continue
+
+        nid = str(row[0]).strip()
+        if not nid:
+            continue
+
+        nodes_action[nid] = {
+            "node_id": nid,
+            "view_timeout_ms": _coerce_int(row[1], 1000),
+            "pipeline_depth": _coerce_int(row[2], 2),
+            "replication_batch_size": _coerce_int(row[3], 64),
+            "equivocation_threshold": _coerce_int(row[4], 5),
+            "vote_aggregation_timeout_ms": _coerce_int(row[5], 500),
+        }
+
+    return {"nodes": nodes_action}
+
+
+_TASK_BUILDERS = {
+    "easy": EasyTask,
+    "medium": MediumTask,
+    "hard": HardTask,
+}
+
+
+def _task_reset_payload(task_name: str) -> Dict[str, Any]:
+    builder = _TASK_BUILDERS.get(str(task_name).lower())
+    if builder is None:
+        return {}
+    return builder().get_initial_conditions()
+
+
+def _task_preset_summary(payload: Optional[Dict[str, Any]], task_name: str = "") -> str:
+    title = f'<span style="{_SECTION_TITLE}">Preset Details</span>'
+    if not payload:
+        return (
+            title +
+            f'<p style="color:{_TEXT_SECONDARY};font-size:12px;margin:0">'
+            "Choose a task preset to load its reset configuration.</p>"
+        )
+
+    task_label = str(task_name or payload.get("task", "")).upper()
+    chips = "".join([
+        _chip("Task", task_label, _ACCENT_CYAN),
+        _chip("Curriculum", str(payload.get("curriculum_level", "—")), _ACCENT_BLUE),
+        _chip("Leader Rotation", str(payload.get("leader_rotation", "—")).replace("LeaderRotation.", ""), _ACCENT_GREEN),
+        _chip("Max Steps", str(payload.get("max_steps", "—")), _ACCENT_AMBER),
+    ])
+    return title + f'<div style="{_ROW_STYLE}">{chips}</div>'
+
+
+def _preview_state_from_reset_payload(payload: Optional[Dict[str, Any]], task_name: str = "") -> Optional[Dict[str, Any]]:
+    if not payload:
+        return None
+
+    n_nodes = max(1, int(payload.get("n_nodes", 4)))
+    f_byzantine = max(0, min(int(payload.get("f_byzantine", 0)), n_nodes - 1))
+    curriculum = int(payload.get("curriculum_level", 1))
+
+    node_states: Dict[str, Any] = {}
+    for idx in range(n_nodes):
+        nid = f"node_{idx}"
+        is_byzantine = idx >= (n_nodes - f_byzantine)
+        role = "leader" if idx == 0 else "replica"
+        node_states[nid] = {
+            "node_id": nid,
+            "is_byzantine": is_byzantine,
+            "current_view": 0,
+            "current_role": role,
+            "committed_log": [],
+            "config": {
+                "view_timeout_ms": 1000,
+                "pipeline_depth": 2,
+                "replication_batch_size": 64,
+                "equivocation_threshold": 5,
+                "vote_aggregation_timeout_ms": 500,
+            },
+        }
+
+    return {
+        "episode_id": f"preset-{task_name or 'preview'}",
+        "step": 0,
+        "curriculum_level": curriculum,
+        "n_nodes": n_nodes,
+        "f_byzantine": f_byzantine,
+        "bfa_strategy": "none",
+        "view_change_count": 0,
+        "node_states": node_states,
+    }
+
+
 def _fmt_log(operation: str, data: Any) -> str:
     if isinstance(data, str):
         return f"[{operation.upper()}] ERROR — {data}"
@@ -591,17 +734,48 @@ def build_accordis_gradio_app(
         "state":    None,
         "last_obs": None,
         "log":      "Ready — click Reset to begin.",
+        "action_rows": [],
+        "task_name": "",
+        "reset_payload": {},
     }
 
     # ── Callbacks ──────────────────────────────────────────────────────────
 
-    async def _do_reset(n_nodes: float, f_byzantine: float, pool_size: float):
+    def _load_task_preset(task_name: str):
+        payload = _task_reset_payload(task_name)
+        _shared["task_name"] = str(task_name).lower() if payload else ""
+        _shared["reset_payload"] = payload
+        preview_state = _preview_state_from_reset_payload(payload, _shared["task_name"])
+        if not payload:
+            return (
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                _task_preset_summary(None),
+                _header_html(None),
+                _build_node_graph(None),
+            )
+
+        return (
+            payload.get("n_nodes", 4),
+            payload.get("f_byzantine", 0),
+            payload.get("pool_size", 1000),
+            _task_preset_summary(payload, _shared["task_name"]),
+            _header_html(preview_state),
+            _build_node_graph(preview_state),
+        )
+
+    async def _do_reset(task_name: str, n_nodes: float, f_byzantine: float, pool_size: float):
         n_nodes_i = max(1, int(n_nodes or 4))
         f_byzantine_i = max(0, min(int(f_byzantine or 0), n_nodes_i - 1))
         pool_size_i = max(1, int(pool_size or 1000))
 
         try:
+            preset_payload = _task_reset_payload(task_name)
+            _shared["task_name"] = str(task_name).lower() if preset_payload else ""
+            _shared["reset_payload"] = preset_payload
             reset_environment_payload = {
+                **preset_payload,
                 "n_nodes": n_nodes_i,
                 "f_byzantine": f_byzantine_i,
                 "pool_size": pool_size_i,
@@ -616,29 +790,16 @@ def build_accordis_gradio_app(
         _shared["state"]    = state
         _shared["last_obs"] = data if isinstance(data, dict) else None
         _shared["log"]      = _fmt_log("reset", data)
+        _shared["action_rows"] = _action_rows_from_state(state)
         return _refresh_ui()
 
-    async def _do_step():
+    async def _do_step(action_rows: Any):
         if _shared["state"] is None:
             _shared["log"] = "[STEP] Not started — click Reset first."
             return _refresh_ui()
-        state       = _shared["state"]
-        node_states = state.get("node_states", {}) if state else {}
-        nodes_action: Dict[str, Any] = {}
-        for nid, ns in node_states.items():
-            if ns.get("is_byzantine"):
-                continue
-            cfg = ns.get("config", {})
-            nodes_action[nid] = {
-                "node_id":                     nid,
-                "view_timeout_ms":             cfg.get("view_timeout_ms",             2000),
-                "pipeline_depth":              cfg.get("pipeline_depth",              2),
-                "replication_batch_size":      cfg.get("replication_batch_size",      64),
-                "equivocation_threshold":      cfg.get("equivocation_threshold",      5),
-                "vote_aggregation_timeout_ms": cfg.get("vote_aggregation_timeout_ms", 500),
-            }
+        _shared["action_rows"] = action_rows if isinstance(action_rows, list) else _shared["action_rows"]
         try:
-            data = await web_manager.step_environment({"nodes": nodes_action})
+            data = await web_manager.step_environment(_action_payload_from_rows(_shared["action_rows"]))
         except Exception as exc:
             data = str(exc)
         try:
@@ -648,6 +809,7 @@ def build_accordis_gradio_app(
         _shared["state"]    = new_state
         _shared["last_obs"] = data if isinstance(data, dict) else None
         _shared["log"]      = _fmt_log("step", data)
+        _shared["action_rows"] = _action_rows_from_state(new_state) or _shared["action_rows"]
         return _refresh_ui()
 
     def _do_get_state():
@@ -657,6 +819,7 @@ def build_accordis_gradio_app(
             state = {"error": str(exc)}
         _shared["state"] = state
         _shared["log"]   = _fmt_log("get_state", state)
+        _shared["action_rows"] = _action_rows_from_state(state) or _shared["action_rows"]
         return _refresh_ui()
 
     def _refresh_ui():
@@ -670,6 +833,8 @@ def build_accordis_gradio_app(
             _shared["log"],
             _honest_table_html(last_obs),
             json.dumps(state, indent=2, default=str) if state else "null",
+            _shared["action_rows"],
+            _task_preset_summary(_shared["reset_payload"], _shared["task_name"]),
         )
 
     # ── Layout ─────────────────────────────────────────────────────────────
@@ -703,17 +868,47 @@ def build_accordis_gradio_app(
                 metrics_html  = gr.HTML(value=_metrics_html(None, None))
                 byzantine_html = gr.HTML(value=_byzantine_panel_html(None, None))
 
-                gr.HTML(f'<span style="{_SECTION_TITLE};margin-top:14px">Reset Configuration</span>')
-                with gr.Row():
-                    inp_n_nodes = gr.Number(value=4, precision=0, label="n_nodes")
-                    inp_f_byzantine = gr.Number(value=1, precision=0, label="f_byzantine")
-                    inp_pool_size = gr.Number(value=1000, precision=0, label="pool_size")
+                gr.HTML(f'<span style="{_SECTION_TITLE};margin-top:14px">Controls</span>')
+                with gr.Tabs():
+                    with gr.Tab("Reset"):
+                        gr.HTML(
+                            f'<p style="color:{_TEXT_SECONDARY};font-size:12px;margin:0 0 12px">'
+                            "Load an `easy`, `medium`, or `hard` task preset, then reset with those environment conditions."
+                            "</p>"
+                        )
+                        task_preset = gr.Radio(
+                            choices=["easy", "medium", "hard"],
+                            value="easy",
+                            label="Task preset",
+                        )
+                        btn_load_task = gr.Button("Load Task Preset", elem_classes="btn-state", size="sm")
+                        with gr.Row():
+                            inp_n_nodes = gr.Number(value=4, precision=0, label="n_nodes")
+                            inp_f_byzantine = gr.Number(value=1, precision=0, label="f_byzantine")
+                            inp_pool_size = gr.Number(value=1000, precision=0, label="pool_size")
+                        preset_html = gr.HTML(value=_task_preset_summary(None))
+                        btn_reset = gr.Button("⟳  Reset Episode", elem_classes="btn-reset", size="sm")
 
-                gr.HTML(f'<span style="{_SECTION_TITLE};margin-top:14px">Operations</span>')
-                with gr.Row():
-                    btn_reset = gr.Button("⟳  Reset",     elem_classes="btn-reset", size="sm")
-                    btn_step  = gr.Button("▶  Step",      elem_classes="btn-step",  size="sm")
-                    btn_state = gr.Button("◎  Get State", elem_classes="btn-state", size="sm")
+                    with gr.Tab("Action"):
+                        gr.HTML(
+                            f'<p style="color:{_TEXT_SECONDARY};font-size:12px;margin:0 0 12px">'
+                            "Edit the honest-node config that will be sent on the next environment step. Byzantine nodes are excluded."
+                            "</p>"
+                        )
+                        action_table = gr.Dataframe(
+                            headers=_ACTION_HEADERS,
+                            datatype=["str", "number", "number", "number", "number", "number"],
+                            value=[],
+                            type="array",
+                            row_count=(0, "dynamic"),
+                            col_count=(len(_ACTION_HEADERS), "fixed"),
+                            interactive=True,
+                            wrap=True,
+                            label="Per-node action payload",
+                        )
+                        with gr.Row():
+                            btn_step  = gr.Button("▶  Step With Action", elem_classes="btn-step",  size="sm")
+                            btn_state = gr.Button("◎  Refresh State", elem_classes="btn-state", size="sm")
 
                 gr.HTML(f'<span style="{_SECTION_TITLE};margin-top:14px">Activity Log</span>')
                 log_box = gr.Textbox(
@@ -743,14 +938,24 @@ def build_accordis_gradio_app(
         # Wire buttons
         _outputs = [
             header_html, cluster_plot, metrics_html,
-            byzantine_html, log_box, honest_table_html, state_json_box,
+            byzantine_html, log_box, honest_table_html, state_json_box, action_table, preset_html,
         ]
+        btn_load_task.click(
+            fn=_load_task_preset,
+            inputs=[task_preset],
+            outputs=[inp_n_nodes, inp_f_byzantine, inp_pool_size, preset_html, header_html, cluster_plot],
+        )
+        task_preset.change(
+            fn=_load_task_preset,
+            inputs=[task_preset],
+            outputs=[inp_n_nodes, inp_f_byzantine, inp_pool_size, preset_html, header_html, cluster_plot],
+        )
         btn_reset.click(
             fn=_do_reset,
-            inputs=[inp_n_nodes, inp_f_byzantine, inp_pool_size],
+            inputs=[task_preset, inp_n_nodes, inp_f_byzantine, inp_pool_size],
             outputs=_outputs
         )
-        btn_step.click( fn=_do_step,     inputs=[], outputs=_outputs)
+        btn_step.click(fn=_do_step, inputs=[action_table], outputs=_outputs)
         btn_state.click(fn=_do_get_state,inputs=[], outputs=_outputs)
 
     return demo
