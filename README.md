@@ -236,7 +236,7 @@ ACCORDIS_MAX_STEPS=150
 # LLM provider (for inference.py)
 PROVIDER=openai
 API_BASE_URL=https://router.huggingface.co/v1
-MODEL=Qwen/Qwen2.5-72B-Instruct
+MODEL_NAME=Qwen/Qwen2.5-72B-Instruct
 HF_TOKEN=...
 ```
 

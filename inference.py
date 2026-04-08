@@ -479,7 +479,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     if args.provider == "huggingface" and args.model is None:
-        args.model = os.getenv("MODEL", "Qwen/Qwen2.5-72B-Instruct")
+        args.model = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
     
     asyncio.run(inference(
         provider=args.provider,
