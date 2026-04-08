@@ -194,7 +194,7 @@ SYSTEM_PROMPT = textwrap.dedent(
     """
 ).strip()
 
-IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")  # Docker image name for OpenEnv runtime
+IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME") or os.getenv("IMAGE_NAME")  # Docker image name for OpenEnv runtime
 ACCORDIS_BASE_URL = os.getenv("ACCORDIS_BASE_URL") or os.getenv("BASE_URL")
 
 class OpenAIClient():
