@@ -42,7 +42,7 @@ class MediumTask(BaseTask):
     n_nodes           = 7
     f_byzantine       = 2
     leader_rotation   = LeaderRotation.ROUND_ROBIN
-    max_steps         = 100
+    max_steps         = 40
 
     def __init__(self, curriculum_level: int = 3) -> None:
         self.curriculum_levels = [curriculum_level]

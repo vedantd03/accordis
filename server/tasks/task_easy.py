@@ -41,7 +41,7 @@ class EasyTask(BaseTask):
     n_nodes           = 4
     f_byzantine       = 0  # overridden per level
     leader_rotation   = LeaderRotation.ROUND_ROBIN
-    max_steps         = 50
+    max_steps         = 40
 
     def __init__(self, curriculum_level: int = 1) -> None:
         self.curriculum_levels = [curriculum_level]

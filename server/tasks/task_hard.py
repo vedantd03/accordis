@@ -12,7 +12,7 @@ from accordis.server.tasks.base_task import BaseTask
 from accordis.server.oracle.verifier import CorrectnessOracle
 
 _POOL_SIZE = 1_800   # drains in ~85 steps at default batch=64, ~10 steps at batch=512
-_MAX_STEPS = 100     # agent budget for LLM cost reasons
+_MAX_STEPS = 40     # agent budget for LLM cost reasons
 
 # throughput denominator: max possible batch per step (no Byzantine adjustment).
 # Byzantine disruption (~30% at level 6) naturally caps achievable throughput at ~0.65,
