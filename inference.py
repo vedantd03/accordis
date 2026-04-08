@@ -44,7 +44,7 @@ import textwrap
 import subprocess
 from dotenv import load_dotenv
 load_dotenv()
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from openai import OpenAI
 
 from models import (
@@ -198,6 +198,45 @@ IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME") or os.getenv("IMAGE_NAME")  # Docker 
 ACCORDIS_BASE_URL = os.getenv("ACCORDIS_BASE_URL") or os.getenv("BASE_URL")
 SUCCESS_SCORE_THRESHOLD = 0.1
 
+
+def _format_exception(exc: Exception) -> str:
+    return f"{exc.__class__.__name__}: {exc}"
+
+
+def _build_task_result(
+    task_name: str,
+    *,
+    steps: int = 0,
+    total_reward: float = 0.0,
+    score: float = 0.0,
+    status: str = "success",
+    error: Optional[str] = None,
+    stage: Optional[str] = None,
+) -> dict:
+    result = {
+        "task": task_name,
+        "status": status,
+        "steps": steps,
+        "total_reward": round(total_reward, 2),
+        "score": round(score, 4),
+    }
+    if error is not None:
+        result["error"] = error
+    if stage is not None:
+        result["stage"] = stage
+    return result
+
+
+def _coerce_config_int(raw_value: Any, fallback: int, field_name: str, node_id: NodeID) -> int:
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        print(
+            f"[WARN] Invalid LLM value for node={node_id} field={field_name}: "
+            f"{raw_value!r}; using previous value {fallback}"
+        )
+        return fallback
+
 class OpenAIClient():
     """OpenAI chat-completion client with Hugging Face model compatibility."""
 
@@ -205,6 +244,10 @@ class OpenAIClient():
         self._BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
         self._MODEL = model
         self._API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+        if not self._API_KEY:
+            raise EnvironmentError(
+                "No API key configured. Set HF_TOKEN or API_KEY before running inference."
+            )
         self._client = OpenAI(
             base_url=self._BASE_URL,
             api_key=self._API_KEY
@@ -248,11 +291,13 @@ def log_end(steps: int, total_reward: float, score: float) -> None:
 
 def _select_task(name: str):
     name = name.lower()
+    if name == "easy":
+        return EasyTask(curriculum_level=1)
     if name == "medium":
         return MediumTask()
     if name == "hard":
         return HardTask()
-    return EasyTask(curriculum_level=1)
+    raise ValueError(f"Unsupported task {name!r}. Expected one of: easy, medium, hard.")
 
 
 def _obs_to_dict(obs_nodes: Dict[NodeID, AccordisObservation]) -> str:
@@ -283,7 +328,7 @@ def _obs_to_dict(obs_nodes: Dict[NodeID, AccordisObservation]) -> str:
             },
         }
 
-    cluster_min_pending = min(o.pending_txn_count for o in obs_nodes.values())
+    cluster_min_pending = min((o.pending_txn_count for o in obs_nodes.values()), default=0)
 
     summary = {"cluster_min_pending": cluster_min_pending, "nodes": node_summary}
     return json.dumps(summary, indent=2)
@@ -305,7 +350,7 @@ def _get_static_action(obs: MultiNodeObservation) -> MultiNodeAction:
 
 
 async def _get_llm_action(
-    llm: OpenAIClient,
+    llm: Optional[OpenAIClient],
     step: int,
     obs: MultiNodeObservation,
     last_reward: float,
@@ -323,33 +368,59 @@ async def _get_llm_action(
         """
     ).strip()
 
-    raw_configs: Dict = {}
+    raw_configs: Dict[str, Any] = {}
     try:
+        if llm is None:
+            raise RuntimeError("LLM client is not available for a non-static provider.")
         text = llm.complete(SYSTEM_PROMPT, user_prompt)
-        raw_configs = json.loads(text)
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict):
+            raise ValueError(f"Expected top-level JSON object, got {type(parsed).__name__}")
+        raw_configs = parsed
     except Exception as exc:
-        print(f"[DEBUG] LLM request or JSON parse failed: {exc}")
+        print(f"[WARN] LLM request or JSON parse failed at step={step}: {_format_exception(exc)}")
 
     node_actions: Dict[NodeID, AccordisAction] = {}
     for nid in node_ids:
         cfg_raw   = raw_configs.get(nid, {})
         prev_cfg  = obs.nodes[nid].current_config
+        if not isinstance(cfg_raw, dict):
+            print(
+                f"[WARN] Invalid config payload for node={nid}: expected object, "
+                f"got {type(cfg_raw).__name__}; using previous config"
+            )
+            cfg_raw = {}
         node_actions[nid] = AccordisAction(
             node_id=nid,
-            view_timeout_ms=int(
-                cfg_raw.get("view_timeout_ms", prev_cfg.view_timeout_ms)
+            view_timeout_ms=_coerce_config_int(
+                cfg_raw.get("view_timeout_ms", prev_cfg.view_timeout_ms),
+                prev_cfg.view_timeout_ms,
+                "view_timeout_ms",
+                nid,
             ),
-            pipeline_depth=int(
-                cfg_raw.get("pipeline_depth", prev_cfg.pipeline_depth)
+            pipeline_depth=_coerce_config_int(
+                cfg_raw.get("pipeline_depth", prev_cfg.pipeline_depth),
+                prev_cfg.pipeline_depth,
+                "pipeline_depth",
+                nid,
             ),
-            replication_batch_size=int(
-                cfg_raw.get("replication_batch_size", prev_cfg.replication_batch_size)
+            replication_batch_size=_coerce_config_int(
+                cfg_raw.get("replication_batch_size", prev_cfg.replication_batch_size),
+                prev_cfg.replication_batch_size,
+                "replication_batch_size",
+                nid,
             ),
-            equivocation_threshold=int(
-                cfg_raw.get("equivocation_threshold", prev_cfg.equivocation_threshold)
+            equivocation_threshold=_coerce_config_int(
+                cfg_raw.get("equivocation_threshold", prev_cfg.equivocation_threshold),
+                prev_cfg.equivocation_threshold,
+                "equivocation_threshold",
+                nid,
             ),
-            vote_aggregation_timeout_ms=int(
-                cfg_raw.get("vote_aggregation_timeout_ms", prev_cfg.vote_aggregation_timeout_ms)
+            vote_aggregation_timeout_ms=_coerce_config_int(
+                cfg_raw.get("vote_aggregation_timeout_ms", prev_cfg.vote_aggregation_timeout_ms),
+                prev_cfg.vote_aggregation_timeout_ms,
+                "vote_aggregation_timeout_ms",
+                nid,
             ),
         )
 
@@ -362,8 +433,28 @@ async def _run_single_task(
     model: Optional[str],
 ) -> dict:
     """Run one full episode for the given task and return a result dict."""
-    task  = _select_task(task_name)
-    conds = task.get_initial_conditions()
+    try:
+        task = _select_task(task_name)
+        conds = task.get_initial_conditions()
+    except Exception as exc:
+        return _build_task_result(
+            task_name,
+            status="error",
+            error=_format_exception(exc),
+            stage="task_setup",
+        )
+
+    llm: Optional[OpenAIClient] = None
+    try:
+        if provider != "static":
+            llm = _create_llm_client(provider=provider, model=model)
+    except Exception as exc:
+        return _build_task_result(
+            task_name,
+            status="error",
+            error=_format_exception(exc),
+            stage="llm_init",
+        )
 
     try:
         env = await _create_environment_client()
@@ -371,15 +462,13 @@ async def _run_single_task(
         print(f"[WARN] Client environment unavailable; using in-process server fallback: {exc}")
         return await _run_single_task_server(task_name, provider, model, llm=llm)
 
-    llm: Optional[OpenAIClient] = None
-    if provider != "static":
-        llm = _create_llm_client(provider=provider, model=model)
-
     log_start(task_name, os.getenv("ACCORDIS_ADAPTER", "simulated"))
 
     total_reward = 0.0
     steps_taken  = 0
     score        = 0.0
+    run_error: Optional[str] = None
+    run_stage: Optional[str] = None
 
     try:
         reset_result = await env.reset(**conds)
@@ -407,13 +496,19 @@ async def _run_single_task(
             if done:
                 break
 
-        state = await env.state()
-        if state.episode_log is not None:
-            score = task.grade(state.episode_log)
-            success = score >= SUCCESS_SCORE_THRESHOLD
+        try:
+            state = await env.state()
+            if state.episode_log is not None:
+                score = task.grade(state.episode_log)
+        except Exception as exc:
+            run_error = _format_exception(exc)
+            run_stage = "grading"
+            print(f"[ERROR] Failed to fetch or grade task state: {run_error}")
 
     except Exception as exc:
-        print(f"[ERROR] Episode error: {exc}")
+        run_error = _format_exception(exc)
+        run_stage = "episode"
+        print(f"[ERROR] Episode error: {run_error}")
 
     finally:
         if llm is not None:
@@ -427,12 +522,15 @@ async def _run_single_task(
             print(f"[DEBUG] env.close() error (container cleanup): {e}")
         log_end(steps=steps_taken, total_reward=total_reward, score=score)
 
-    return {
-        "task":         task_name,
-        "steps":        steps_taken,
-        "total_reward": round(total_reward, 2),
-        "score":        round(score, 4),
-    }
+    return _build_task_result(
+        task_name,
+        steps=steps_taken,
+        total_reward=total_reward,
+        score=score,
+        status="error" if run_error else "success",
+        error=run_error,
+        stage=run_stage,
+    )
 
 
 async def _run_single_task_server(
@@ -442,19 +540,37 @@ async def _run_single_task_server(
     llm: Optional[OpenAIClient] = None,
 ) -> dict:
     """Run one episode using the in-process server environment as a fallback."""
-    task = _select_task(task_name)
-    conds = task.get_initial_conditions()
+    try:
+        task = _select_task(task_name)
+        conds = task.get_initial_conditions()
+    except Exception as exc:
+        return _build_task_result(
+            task_name,
+            status="error",
+            error=_format_exception(exc),
+            stage="task_setup",
+        )
 
     env = ServerAccordisEnvironment()
     owns_llm = llm is None and provider != "static"
     if llm is None and provider != "static":
-        llm = _create_llm_client(provider=provider, model=model)
+        try:
+            llm = _create_llm_client(provider=provider, model=model)
+        except Exception as exc:
+            return _build_task_result(
+                task_name,
+                status="error",
+                error=_format_exception(exc),
+                stage="llm_init",
+            )
 
     log_start(task_name, os.getenv("ACCORDIS_ADAPTER", "simulated"))
 
     total_reward = 0.0
     steps_taken = 0
     score = 0.0
+    run_error: Optional[str] = None
+    run_stage: Optional[str] = None
 
     try:
         obs: MultiNodeObservation = env.reset(**conds)
@@ -480,12 +596,18 @@ async def _run_single_task_server(
             if done:
                 break
 
-        if env._episode_log is not None:
-            score = task.grade(env._episode_log)
-            success = score >= SUCCESS_SCORE_THRESHOLD
+        try:
+            if env._episode_log is not None:
+                score = task.grade(env._episode_log)
+        except Exception as exc:
+            run_error = _format_exception(exc)
+            run_stage = "grading"
+            print(f"[ERROR] Failed to grade fallback episode: {run_error}")
 
     except Exception as exc:
-        print(f"[DEBUG] Episode error: {exc}")
+        run_error = _format_exception(exc)
+        run_stage = "episode"
+        print(f"[ERROR] Fallback episode error: {run_error}")
 
     finally:
         if owns_llm and llm is not None:
@@ -501,12 +623,15 @@ async def _run_single_task_server(
             pass
         log_end(steps=steps_taken, total_reward=total_reward, score=score)
 
-    return {
-        "task": task_name,
-        "steps": steps_taken,
-        "total_reward": round(total_reward, 2),
-        "score": round(score, 4),
-    }
+    return _build_task_result(
+        task_name,
+        steps=steps_taken,
+        total_reward=total_reward,
+        score=score,
+        status="error" if run_error else "success",
+        error=run_error,
+        stage=run_stage,
+    )
 
 
 async def _create_environment_client() -> AccordisEnvironment:
@@ -553,7 +678,9 @@ def _create_llm_client(provider: str, model: Optional[str]) -> OpenAIClient:
     if provider == "huggingface" or provider == "openai":
         return OpenAIClient(model=model)
 
-    return OpenAIClient.create(provider=provider, model=model)
+    raise ValueError(
+        f"Unsupported provider {provider!r}. Expected one of: static, huggingface, openai."
+    )
 
 
 async def inference(
@@ -576,10 +703,26 @@ async def inference(
 
     results = {}
     for task_name in tasks:
-        results[task_name] = await _run_single_task(task_name, provider, model)
+        try:
+            results[task_name] = await _run_single_task(task_name, provider, model)
+        except Exception as exc:
+            results[task_name] = _build_task_result(
+                task_name,
+                status="error",
+                error=_format_exception(exc),
+                stage="task_runner",
+            )
+
+    task_statuses = [result["status"] for result in results.values()]
+    if task_statuses and all(status == "success" for status in task_statuses):
+        overall_status = "success"
+    elif task_statuses and any(status == "success" for status in task_statuses):
+        overall_status = "partial_success"
+    else:
+        overall_status = "error"
 
     inference_result = {
-        "status":   "success",
+        "status":   overall_status,
         "provider": provider,
         "tasks":    tasks,
         "data":     results,
@@ -608,8 +751,10 @@ if __name__ == "__main__":
     if args.provider == "openai" and args.model is None:
         raise ValueError("Model must be specified for OpenAI provider")
     
-    asyncio.run(inference(
+    result = asyncio.run(inference(
         provider=args.provider,
         model=args.model,
         tasks=args.tasks
     ))
+    if result["status"] != "success":
+        raise SystemExit(1)
