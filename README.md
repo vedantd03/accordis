@@ -14,7 +14,19 @@ tags:
 ---
 # Accordis Environment
 
-Accordis is an [OpenEnv](https://openenv.dev) reinforcement learning environment for self-adaptive Byzantine Fault Tolerant (BFT) consensus tuning. An RL agent learns to configure per-node BFT protocol parameters across a cluster of honest nodes while a Byzantine adversary actively tries to disrupt consensus.
+Accordis is an [OpenEnv](https://openenv.dev) reinforcement learning environment with reactive adversary and auto-advancing curriculum for Byzantine Fault Tolerant (BFT) consensus tuning. An RL agent learns to configure per-node BFT protocol parameters across a cluster of honest nodes while a Byzantine adversary actively tries to disrupt consensus.
+
+## Key Characteristics
+
+**Auto-advancing curriculum.** The environment tracks agent performance over a rolling 50-episode window and automatically advances difficulty (levels 1–8) when the agent's liveness rate sustains above 85%. No manual configuration or external scheduler is needed — the environment promotes itself as the agent improves.
+
+**Reactive adversary.** One Byzantine failure strategy (`ADAPTIVE_MIRROR`) reads the agent's live per-node configuration each step and calibrates its disruption timing to land just after the agent's vote aggregation window closes. The adversary tightens its attack as the agent tunes more precisely, creating a continuous pressure signal rather than a fixed obstacle.
+
+**Partial observability under adversarial conditions.** Each honest node sees only its own local metrics — phase latencies, QC miss streaks, peer suspicion signals, throughput. The agent must infer cluster-wide health and Byzantine activity from these fragmented views while tuning five configuration knobs per node per round.
+
+**Built-in correctness verification.** A correctness oracle runs Agreement, Validity, and Liveness checks against the full hidden state every step. Safety violations terminate the episode immediately with zero score, making the environment intolerant of unsafe configurations regardless of throughput gains.
+
+**Reproducible adversarial episodes.** All Byzantine strategy selection is seeded, so every episode can be exactly replayed for debugging, ablations, or fair multi-agent comparison.
 
 ## What Is It and Why Was It Built
 
