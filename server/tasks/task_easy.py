@@ -11,7 +11,7 @@ from accordis.server.oracle.verifier import CorrectnessOracle
 
 
 def _safe_score(score: float) -> float:
-    return round(max(0.0, min(1.0, float(score))), 3)
+    return max(0.01, min(0.99, round(float(score), 2)))
 
 
 class EasyTask(BaseTask):

@@ -196,6 +196,7 @@ SYSTEM_PROMPT = textwrap.dedent(
 
 IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME") or os.getenv("IMAGE_NAME")  # Docker image name for OpenEnv runtime
 ACCORDIS_BASE_URL = os.getenv("ACCORDIS_BASE_URL") or os.getenv("BASE_URL")
+SUCCESS_SCORE_THRESHOLD = 0.1
 
 class OpenAIClient():
     """OpenAI chat-completion client with Hugging Face model compatibility."""
@@ -409,6 +410,7 @@ async def _run_single_task(
         state = await env.state()
         if state.episode_log is not None:
             score = task.grade(state.episode_log)
+            success = score >= SUCCESS_SCORE_THRESHOLD
 
     except Exception as exc:
         print(f"[ERROR] Episode error: {exc}")
@@ -480,6 +482,7 @@ async def _run_single_task_server(
 
         if env._episode_log is not None:
             score = task.grade(env._episode_log)
+            success = score >= SUCCESS_SCORE_THRESHOLD
 
     except Exception as exc:
         print(f"[DEBUG] Episode error: {exc}")
