@@ -318,6 +318,8 @@ uv run python inference.py --provider huggingface--model Qwen/Qwen2.5-72B-Instru
 uv run python inference.py --provider static --tasks easy
 ```
 
+`inference.py` can connect either to a Docker image via `LOCAL_IMAGE_NAME=accordis` or to an already-running server via `ACCORDIS_BASE_URL=http://localhost:8000`. If Docker is unavailable, prefer the base URL mode after starting the server locally.
+
 The baseline is also available via the server API:
 
 ```bash

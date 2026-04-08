@@ -26,6 +26,10 @@ _THROUGHPUT_DENOM = 170.0
 _VC_DENOM = 50
 
 
+def _safe_score(score: float) -> float:
+    return round(max(0.0, min(1.0, float(score))), 3)
+
+
 class HardTask(BaseTask):
     """Level 6–8 task.
 
@@ -100,27 +104,31 @@ class HardTask(BaseTask):
               + 0.10 × vc_penalty
               + 0.10 × correctness
         """
-        if not episode_log.steps:
+        if episode_log is None or not getattr(episode_log, "steps", None):
             return 0.0
 
-        oracle = CorrectnessOracle()
-        final_state = episode_log.steps[-1]
+        try:
+            oracle = CorrectnessOracle()
+            final_state = episode_log.steps[-1]
 
-        liveness    = oracle.check_liveness(final_state)
-        verifier    = oracle.run_all(final_state)
-        correctness = 1.0 if (not verifier.agreement_violated and not verifier.validity_violated) else 0.0
+            liveness = oracle.check_liveness(final_state)
+            verifier = oracle.run_all(final_state)
+            correctness = 1.0 if (not verifier.agreement_violated and not verifier.validity_violated) else 0.0
 
-        steps = max(1, final_state.step)
-        txns_per_step    = liveness.committed_count / steps
-        throughput_score = min(1.0, txns_per_step / _THROUGHPUT_DENOM)
+            steps = max(1, getattr(final_state, "step", 1))
+            committed_count = getattr(liveness, "committed_count", 0)
+            txns_per_step = committed_count / steps
+            throughput_score = min(1.0, txns_per_step / _THROUGHPUT_DENOM)
 
-        view_change_count = final_state.view_change_count
-        vc_penalty = max(0.0, 1.0 - view_change_count / _VC_DENOM)
+            view_change_count = getattr(final_state, "view_change_count", 0)
+            vc_penalty = max(0.0, 1.0 - view_change_count / _VC_DENOM)
 
-        score = (
-            0.05 * liveness.liveness_rate
-            + 0.75 * throughput_score
-            + 0.10 * vc_penalty
-            + 0.10 * correctness
-        )
-        return max(0.0, min(1.0, score))
+            score = (
+                0.05 * getattr(liveness, "liveness_rate", 0.0)
+                + 0.75 * throughput_score
+                + 0.10 * vc_penalty
+                + 0.10 * correctness
+            )
+            return _safe_score(score)
+        except Exception:
+            return 0.0

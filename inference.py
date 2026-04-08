@@ -41,9 +41,11 @@ import os
 import asyncio
 import argparse
 import textwrap
+import subprocess
 from dotenv import load_dotenv
 load_dotenv()
 from typing import Dict, Optional
+from openai import OpenAI
 
 from models import (
     AccordisAction,
@@ -55,6 +57,7 @@ from models import (
 )
 
 from client import AccordisEnvironment
+from server.accordis_environment import AccordisEnvironment as ServerAccordisEnvironment
 from server.tasks.task_easy import EasyTask
 from server.tasks.task_medium import MediumTask
 from server.tasks.task_hard import HardTask
@@ -191,23 +194,23 @@ SYSTEM_PROMPT = textwrap.dedent(
     """
 ).strip()
 
-IMAGE_NAME = os.getenv("IMAGE_NAME") # If you are using docker image 
+IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")  # Docker image name for OpenEnv runtime
+ACCORDIS_BASE_URL = os.getenv("ACCORDIS_BASE_URL") or os.getenv("BASE_URL")
 
-class HuggingFaceClient():
+class OpenAIClient():
     """OpenAI chat-completion client with Hugging Face model compatibility."""
 
     def __init__(self, model: str) -> None:
-        from openai import AsyncOpenAI
         self._BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
         self._MODEL = model
         self._API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-        self._client = AsyncOpenAI(
+        self._client = OpenAI(
             base_url=self._BASE_URL,
             api_key=self._API_KEY
         )
 
-    async def complete(self, system: str, user: str) -> str:
-        resp = await self._client.chat.completions.create(
+    def complete(self, system: str, user: str) -> str:
+        resp = self._client.chat.completions.create(
             model=self._MODEL,
             messages=[
                 {"role": "system", "content": system},
@@ -301,7 +304,7 @@ def _get_static_action(obs: MultiNodeObservation) -> MultiNodeAction:
 
 
 async def _get_llm_action(
-    llm: HuggingFaceClient,
+    llm: OpenAIClient,
     step: int,
     obs: MultiNodeObservation,
     last_reward: float,
@@ -321,8 +324,7 @@ async def _get_llm_action(
 
     raw_configs: Dict = {}
     try:
-        # text = await asyncio.to_thread(llm.complete, SYSTEM_PROMPT, user_prompt)
-        text = await llm.complete(SYSTEM_PROMPT, user_prompt)
+        text = llm.complete(SYSTEM_PROMPT, user_prompt)
         raw_configs = json.loads(text)
     except Exception as exc:
         print(f"[DEBUG] LLM request or JSON parse failed: {exc}")
@@ -362,15 +364,15 @@ async def _run_single_task(
     task  = _select_task(task_name)
     conds = task.get_initial_conditions()
 
-    if IMAGE_NAME is not None:
-        print(f"Using Docker image: {IMAGE_NAME}")
-        env = await AccordisEnvironment.from_docker_image(image=IMAGE_NAME)
-    else:
-        raise ValueError("IMAGE_NAME environment variable must be set to run the inference script.")
+    try:
+        env = await _create_environment_client()
+    except Exception as exc:
+        print(f"[WARN] Client environment unavailable; using in-process server fallback: {exc}")
+        return await _run_single_task_server(task_name, provider, model, llm=llm)
 
-    llm: Optional[HuggingFaceClient] = None
+    llm: Optional[OpenAIClient] = None
     if provider != "static":
-        llm = HuggingFaceClient(model=model)
+        llm = _create_llm_client(provider=provider, model=model)
 
     log_start(task_name, os.getenv("ACCORDIS_ADAPTER", "simulated"))
 
@@ -431,6 +433,126 @@ async def _run_single_task(
     }
 
 
+async def _run_single_task_server(
+    task_name: str,
+    provider: str,
+    model: Optional[str],
+    llm: Optional[OpenAIClient] = None,
+) -> dict:
+    """Run one episode using the in-process server environment as a fallback."""
+    task = _select_task(task_name)
+    conds = task.get_initial_conditions()
+
+    env = ServerAccordisEnvironment()
+    owns_llm = llm is None and provider != "static"
+    if llm is None and provider != "static":
+        llm = _create_llm_client(provider=provider, model=model)
+
+    log_start(task_name, os.getenv("ACCORDIS_ADAPTER", "simulated"))
+
+    total_reward = 0.0
+    steps_taken = 0
+    score = 0.0
+
+    try:
+        obs: MultiNodeObservation = env.reset(**conds)
+        last_reward = 0.0
+
+        episode_max_steps = conds.get("max_steps", int(os.getenv("ACCORDIS_MAX_STEPS", "100")))
+        for step in range(1, episode_max_steps + 1):
+            if provider == "static":
+                action = _get_static_action(obs)
+            else:
+                action = await _get_llm_action(llm, step, obs, last_reward)
+
+            obs = env.step(action)
+
+            reward = float(obs.reward) if obs.reward is not None else 0.0
+            done = bool(obs.done)
+            last_reward = reward
+            total_reward += reward
+            steps_taken = step
+
+            log_step(step=step, action=action, obs=obs, reward=reward, total=total_reward, done=done)
+
+            if done:
+                break
+
+        if env._episode_log is not None:
+            score = task.grade(env._episode_log)
+
+    except Exception as exc:
+        print(f"[DEBUG] Episode error: {exc}")
+
+    finally:
+        if owns_llm and llm is not None:
+            try:
+                await llm.close()
+            except Exception:
+                pass
+        try:
+            close = getattr(env, "close", None)
+            if callable(close):
+                close()
+        except Exception:
+            pass
+        log_end(steps=steps_taken, total_reward=total_reward, score=score)
+
+    return {
+        "task": task_name,
+        "steps": steps_taken,
+        "total_reward": round(total_reward, 2),
+        "score": round(score, 4),
+    }
+
+
+async def _create_environment_client() -> AccordisEnvironment:
+    """Create an environment client from either Docker or a running server."""
+    if IMAGE_NAME:
+        print(f"Using Docker image: {IMAGE_NAME}")
+        try:
+            return await AccordisEnvironment.from_docker_image(image=IMAGE_NAME)
+        except Exception as exc:
+            if ACCORDIS_BASE_URL:
+                print(
+                    "Docker runtime unavailable; falling back to "
+                    f"ACCORDIS_BASE_URL={ACCORDIS_BASE_URL}"
+                )
+                return AccordisEnvironment(base_url=ACCORDIS_BASE_URL)
+
+            message = (
+                "Failed to start the Accordis environment from Docker image "
+                f"{IMAGE_NAME!r}. Make sure Docker is installed and the daemon "
+                "is running, or set ACCORDIS_BASE_URL=http://localhost:8000 to "
+                "use an already running server."
+            )
+            if isinstance(exc, subprocess.CalledProcessError):
+                detail = f" docker command failed: {' '.join(exc.cmd)} (exit {exc.returncode})."
+            else:
+                detail = f" original error: {exc}"
+            raise RuntimeError(message + detail) from exc
+
+    if ACCORDIS_BASE_URL:
+        print(f"Using running Accordis server: {ACCORDIS_BASE_URL}")
+        return AccordisEnvironment(base_url=ACCORDIS_BASE_URL)
+
+    raise ValueError(
+        "No environment target configured. Set IMAGE_NAME to use Docker, or "
+        "set ACCORDIS_BASE_URL=http://localhost:8000 to use a running Accordis server."
+    )
+
+
+def _create_llm_client(provider: str, model: Optional[str]) -> OpenAIClient:
+    """Create the right LLM client for the selected provider."""
+    if model is None:
+        raise ValueError("model must be set when provider is not 'static'")
+
+    if provider == "huggingface" or provider == "openai":
+        return OpenAIClient(model=model)
+
+    return OpenAIClient.create(provider=provider, model=model)
+
+
 async def inference(
     provider: str,
     model: Optional[str],
@@ -466,11 +588,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Accordis baseline evaluation")
     parser.add_argument(
         "--provider", default="huggingface",
-        choices=["static", "huggingface"],
+        choices=["static", "huggingface", "openai"],
         help="LLM provider (default: huggingface)"
     )
     parser.add_argument(
-        "--model", default=None,
+        "--model", default=os.getenv("MODEL_NAME", None),
         help="LLM model to use (default: provider-specific default)"
     )
     parser.add_argument(
@@ -480,6 +602,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.provider == "huggingface" and args.model is None:
         args.model = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+    if args.provider == "openai" and args.model is None:
+        raise ValueError("Model must be specified for OpenAI provider")
     
     asyncio.run(inference(
         provider=args.provider,

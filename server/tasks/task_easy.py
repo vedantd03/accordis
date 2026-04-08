@@ -10,6 +10,10 @@ from accordis.server.tasks.base_task import BaseTask
 from accordis.server.oracle.verifier import CorrectnessOracle
 
 
+def _safe_score(score: float) -> float:
+    return round(max(0.0, min(1.0, float(score))), 3)
+
+
 class EasyTask(BaseTask):
     """Level 1–2 task.
 
@@ -59,22 +63,25 @@ class EasyTask(BaseTask):
               + 0.3 × max(0, 1 - view_change_count / 5)
               + 0.2 × (1.0 if agreement_ok and validity_ok else 0.0)
         """
-        if not episode_log.steps:
+        if episode_log is None or not getattr(episode_log, "steps", None):
             return 0.0
 
-        oracle = CorrectnessOracle()
-        final_state = episode_log.steps[-1]
+        try:
+            oracle = CorrectnessOracle()
+            final_state = episode_log.steps[-1]
 
-        liveness    = oracle.check_liveness(final_state)
-        verifier    = oracle.run_all(final_state)
-        correctness = 1.0 if (not verifier.agreement_violated and not verifier.validity_violated) else 0.0
+            liveness    = oracle.check_liveness(final_state)
+            verifier    = oracle.run_all(final_state)
+            correctness = 1.0 if (not verifier.agreement_violated and not verifier.validity_violated) else 0.0
 
-        view_change_count = final_state.view_change_count
-        vc_penalty = max(0.0, 1.0 - view_change_count / 5.0)
+            view_change_count = getattr(final_state, "view_change_count", 0)
+            vc_penalty = max(0.0, 1.0 - view_change_count / 5.0)
 
-        score = (
-            0.5 * liveness.liveness_rate
-            + 0.3 * vc_penalty
-            + 0.2 * correctness
-        )
-        return max(0.0, min(1.0, score))
+            score = (
+                0.5 * getattr(liveness, "liveness_rate", 0.0)
+                + 0.3 * vc_penalty
+                + 0.2 * correctness
+            )
+            return _safe_score(score)
+        except Exception:
+            return 0.0
