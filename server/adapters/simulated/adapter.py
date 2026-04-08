@@ -22,7 +22,11 @@ from accordis.models import (
     Transaction,
 )
 from accordis.server.adapters.base import BaseConsensusAdapter
-from accordis.server.adapters.simulated.hotstuff_sim import HotStuffSimulator, SimulatedNode
+from accordis.server.adapters.simulated.hotstuff_sim import (
+    HotStuffSimulator,
+    SimulatedNode,
+    VIEW_TICK_MS,
+)
 from accordis.server.adapters.simulated.network_sim import NetworkSimulator
 from accordis.server.adapters.simulated.bfa_sim import ByzantineInjector
 from accordis.server.network.fault_profiles import get_fault_profile
@@ -37,6 +41,7 @@ class SimulatedConsensusAdapter(BaseConsensusAdapter):
         self._network_sim = NetworkSimulator(seed=seed)
         self._hotstuff = HotStuffSimulator(rng=self._rng)
         self._injector = ByzantineInjector()
+        self._curriculum_level: int = 1  # saved so start_cluster can re-apply the profile
 
         self._honest_nodes: List[NodeID] = []
         self._byzantine_nodes: List[NodeID] = []
@@ -54,20 +59,23 @@ class SimulatedConsensusAdapter(BaseConsensusAdapter):
         n_nodes: int,
         f_byzantine: int,
         leader_rotation: LeaderRotation,
+        pool_size: int = 1000,
     ) -> List[NodeID]:
         """Start a fresh cluster. Returns node IDs: honest first, Byzantine last."""
         self._is_running = True
         self._current_tick = 0
         self._rng = random.Random(self._seed)
         self._network_sim = NetworkSimulator(seed=self._seed)
+        # Re-apply the curriculum fault profile that was set before start_cluster()
+        profile = get_fault_profile(self._curriculum_level)
+        self._network_sim.set_profile(profile)
 
         # Generate transaction pool
-        self._txn_counter = 0
         self._episode_txn_pool = [
             Transaction(id=f"tx_{i}", submitted_at=0)
-            for i in range(1000)
+            for i in range(pool_size)
         ]
-        self._txn_counter = 1000
+        self._txn_counter = pool_size
 
         # Create nodes
         honest_count = n_nodes - f_byzantine
@@ -111,6 +119,7 @@ class SimulatedConsensusAdapter(BaseConsensusAdapter):
             self._nodes[node_id].config = config
 
     def configure_network(self, curriculum_level: int, node_ids: List[NodeID]) -> None:
+        self._curriculum_level = curriculum_level
         profile = get_fault_profile(curriculum_level)
         self._network_sim.set_profile(profile)
 
@@ -173,12 +182,14 @@ class SimulatedConsensusAdapter(BaseConsensusAdapter):
         window = node.recent_commit_counts
         committed_tps = sum(window) / max(1, len(window))
 
-        # Pending count: total submitted - committed
-        committed_ids: set = set()
-        for block in node.committed_log:
-            for tx in block.transactions:
-                committed_ids.add(tx.id)
-        pending_count = len(self._episode_txn_pool) - len(committed_ids)
+        # Pending count: total submitted - globally committed (via shared committed_txn_ids set)
+        pending_count = len(self._episode_txn_pool) - len(self._hotstuff.get_committed_txn_ids())
+
+        # ms-equivalent time the node has been stuck in its current view.
+        # 1 tick = VIEW_TICK_MS ms; expressed in ms so the agent can compare it
+        # directly against view_timeout_ms (same unit) without needing to know
+        # the internal tick scale.
+        view_stuck_ms = max(0, self._hotstuff.get_current_tick() - node.view_start_tick) * VIEW_TICK_MS
 
         return {
             "role":                   node.current_role.value,
@@ -193,6 +204,7 @@ class SimulatedConsensusAdapter(BaseConsensusAdapter):
             "committed_tps":          committed_tps,
             "pending_count":          max(0, pending_count),
             "pipeline_utilisation":   node.pipeline_utilisation,
+            "view_stuck_ms":          view_stuck_ms,
         }
 
     def get_committed_log(self, node_id: NodeID) -> List[dict]:
@@ -200,7 +212,8 @@ class SimulatedConsensusAdapter(BaseConsensusAdapter):
         node = self._nodes.get(node_id)
         if node is None:
             return []
-        return [block.model_dump() for block in node.committed_log]
+        # committed_log is List[SimBlock] — convert to Pydantic Block then to dict
+        return [block.to_pydantic().model_dump() for block in node.committed_log]
 
     def get_honest_nodes(self) -> List[NodeID]:
         return list(self._honest_nodes)
@@ -210,6 +223,16 @@ class SimulatedConsensusAdapter(BaseConsensusAdapter):
 
     def get_finalized_txn_count(self) -> int:
         return len(self._hotstuff.get_committed_txn_ids())
+
+    def get_cumulative_view_changes(self) -> int:
+        """Return max cumulative view_change_count across all honest nodes."""
+        if not self._honest_nodes:
+            return 0
+        return max(
+            self._nodes[nid].view_change_count
+            for nid in self._honest_nodes
+            if nid in self._nodes
+        )
 
     # ── Byzantine Injection ──────────────────────────────────────────────────
 
@@ -224,5 +247,9 @@ class SimulatedConsensusAdapter(BaseConsensusAdapter):
         if node is None or not node.is_byzantine:
             return
 
-        action = self._injector.build_action(strategy, target_nodes, parameters)
+        try:
+            byz_index = self._byzantine_nodes.index(byzantine_node_id)
+        except ValueError:
+            byz_index = 0
+        action = self._injector.build_action(strategy, target_nodes, parameters, byz_index=byz_index)
         node.pending_byzantine_action = action

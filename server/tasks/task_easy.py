@@ -20,7 +20,7 @@ class EasyTask(BaseTask):
       leader_rotation:  round_robin
       network_profile:  FaultProfile(p50=2ms, p99=5ms, jitter=1ms, loss=0%)
       bfa_strategy:     NONE / RANDOM_DELAY
-      max_steps:        200
+      max_steps:        50
 
     Success criteria:
       liveness_rate >= 0.95, view_change_count <= 3, no oracle violations
@@ -37,7 +37,7 @@ class EasyTask(BaseTask):
     n_nodes           = 4
     f_byzantine       = 0  # overridden per level
     leader_rotation   = LeaderRotation.ROUND_ROBIN
-    max_steps         = 200
+    max_steps         = 50
 
     def __init__(self, curriculum_level: int = 1) -> None:
         self.curriculum_levels = [curriculum_level]

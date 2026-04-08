@@ -145,6 +145,18 @@ class TestStep:
                 break
         assert result.done is True
 
+    def test_step_snapshots_reuse_large_episode_state(self, env):
+        obs = env.reset(pool_size=100)
+        actions = self._make_actions(env, obs)
+
+        env.step(actions)
+
+        assert env._episode_log is not None
+        snapshot = env._episode_log.steps[0]
+        assert snapshot.episode_txn_pool is env.state.episode_txn_pool
+        assert snapshot.proposal_registry is env.state.proposal_registry
+        assert snapshot.node_states is not env.state.node_states
+
 
 class TestClampAction:
     def test_clamp_view_timeout_below_min(self, env):
