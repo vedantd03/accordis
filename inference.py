@@ -232,9 +232,9 @@ def log_start(task: str, adapter: str) -> None:
     print(f"[START] task={task} adapter={adapter}")
 
 
-def log_step(step: int, action: any, reward: float, total: float, done: bool) -> None:
+def log_step(step: int, action: any, obs: any, reward: float, total: float, done: bool) -> None:
     print(
-        f"[STEP]  step={step} action={action} reward={reward:.2f} total={total:.1f} done={done}"
+        f"[STEP]  step={step} action={action} observation={obs} reward={reward:.2f} total={total:.1f} done={done}"
     )
 
 def log_end(steps: int, total_reward: float, score: float) -> None:
@@ -400,7 +400,7 @@ async def _run_single_task(
             total_reward += reward
             steps_taken   = step
 
-            log_step(step=step, action=action, reward=reward, total=total_reward, done=done)
+            log_step(step=step, action=action, obs=obs, reward=reward, total=total_reward, done=done)
 
             if done:
                 break
