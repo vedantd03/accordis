@@ -14,7 +14,7 @@ tags:
 ---
 # Accordis Environment
 
-> Infrastructure teams at companies like Coinbase, Visa, and AWS run distributed systems that must reach agreement across dozens or hundreds of nodes — on which transactions are valid, who owns what, what the current state of the database is. These consensus protocols expose configuration knobs (timeouts, batch sizes, fault thresholds) that are typically set once during deployment and left static. That works fine under normal conditions. But when a coordinated group of compromised validators starts injecting conflicting proposals, selectively withholding votes, and timing message delays to exploit the current configuration — static parameters become the weakest link. The protocol isn't broken; it's just tuned for calm weather, not a storm.
+> Infrastructure teams at companies like Coinbase, Visa, and AWS run distributed systems that must reach agreement across dozens or hundreds of nodes — on which transactions are valid, who owns what, what the current state of the database is. This state of agreement is achieved with the help of consensus protocols, these protocols expose configuration knobs (timeouts, batch sizes, fault thresholds) that are typically set once during deployment and left static. That works fine under normal conditions. But when a coordinated group of compromised validators starts injecting conflicting proposals, selectively withholding votes, and timing message delays to exploit the current configuration — static parameters become the weakest link. The protocol isn't broken; it's just tuned for calm weather, not a storm.
 
 > Today, the response is experienced engineers working through runbooks — adjusting timeout values, analyzing historical patterns, deploying updated configurations. This process is rigorous but fundamentally slow: it takes hours or days of human analysis while an adversary adapts in minutes. Accordis exists to close that gap.
 
@@ -56,21 +56,61 @@ BFTBrain (Wu et al., NSDI 2025) demonstrated 18–119% throughput improvements o
 
 ---
 
-## Related Work
+# What is Accordis ?
 
-The problem of adaptive consensus tuning under dynamic conditions is an active area of research. The following papers explore complementary approaches:
+```
+                              ACCORDIS ARCHITECTURE
+ ┌─────────────────────────────────────────────────────────────────────────────┐
+ │                                                                             │
+ │    ┌───────────────┐    Action (5 params x N nodes)    ┌────────────────┐   │
+ │    │   RL Agent    │ ─────────────────────────────────> │  OpenEnv API   │   │
+ │    │   (Policy)    │ <───────────────────────────────── │  (FastAPI/WS)  │   │
+ │    └───────────────┘    Observation + Reward            └───────┬────────┘   │
+ │                                                                │            │
+ │  ┌─────────────────────────────────────────────────────────────┼──────────┐  │
+ │  │  AccordisEnvironment Orchestrator                           │          │  │
+ │  │  ┌──────────────┐  ┌──────────────────┐  ┌──────────────┐  │          │  │
+ │  │  │  Curriculum   │  │     Reward       │  │ Correctness  │  │          │  │
+ │  │  │   Manager     │  │   Calculator     │  │   Oracle     │  │          │  │
+ │  │  │ (Levels 1-8)  │  │  (9 signals)     │  │ (Agreement,  │  │          │  │
+ │  │  │ Auto-advance  │  │  Throughput +     │  │  Validity,   │  │          │  │
+ │  │  │ on 85% liven. │  │  Safety + Resil. │  │  Liveness)   │  │          │  │
+ │  │  └──────┬───────┘  └────────▲─────────┘  └──────┬───────┘  │          │  │
+ │  └─────────┼───────────────────┼────────────────────┼──────────┘          │  │
+ │            │                   │                    │                     │  │
+ │  ┌─────────▼───────────────────┼────────────────────▼──────────────────┐  │  │
+ │  │  Chained HotStuff Simulation                                        │  │  │
+ │  │                                                                     │  │  │
+ │  │  ┌─────────────────────────────────────────────────────────────┐    │  │  │
+ │  │  │  Node Cluster                                               │    │  │  │
+ │  │  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────┐ │    │  │  │
+ │  │  │  │ Honest   │  │ Honest   │  │ Honest   │  │ Byzantine  │ │    │  │  │
+ │  │  │  │ Node 1   │  │ Node 2   │  │ Node N   │  │   Node(s)  │ │    │  │  │
+ │  │  │  │          │  │          │  │          │  │            │ │    │  │  │
+ │  │  │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └─────┬──────┘ │    │  │  │
+ │  │  └───────┼──────────────┼──────────────┼──────────────┼────────┘    │  │  │
+ │  │          └──────────────┼──────────────┘              │             │  │  │
+ │  │                    ┌────▼────┐                   ┌────▼──────────┐  │  │  │
+ │  │                    │ Network │ <── disruption ── │  Byzantine    │  │  │  │
+ │  │                    │   Sim   │    injection      │ Failure Agent │  │  │  │
+ │  │                    │ Latency │                   │ 8 strategies  │  │  │  │
+ │  │                    │ Jitter  │                   │ ADAPTIVE_     │  │  │  │
+ │  │                    │ Loss    │                   │ MIRROR, FORK, │  │  │  │
+ │  │                    └─────────┘                   │ EQUIVOCATION..│  │  │  │
+ │  │                                                  └───────────────┘  │  │  │
+ │  └─────────────────────────────────────────────────────────────────────┘  │  │
+ │                                                                             │
+ └─────────────────────────────────────────────────────────────────────────────┘
 
-- **BFTBrain: Adaptive BFT Consensus with Reinforcement Learning** (Wu et al.) — Demonstrates that no single BFT protocol performs optimally across all conditions. Uses reinforcement learning to dynamically switch between multiple BFT protocols in real time, with a decentralized learning coordination mechanism resilient to adversarial data manipulation. [arXiv:2408.06432](https://arxiv.org/html/2408.06432v1)
-- **Meta Reinforcement Learning Based Dynamic Tuning for Blockchain Systems in Diverse Network Environments** (Pei et al.) — Proposes MetaTune, a meta-RL framework that automatically discovers optimal blockchain parameter configurations as network bandwidth fluctuates. Tested on the ChainMaker platform, it shows that adaptive approaches significantly reduce the data samples needed to generalize across varying conditions compared to non-adaptive methods. [Elsevier](https://www.sciencedirect.com/science/article/pii/S2096720924000745)
-- **An Adaptive Blockchain Framework for Federated IoMT with Reinforcement Learning-Based Consensus and Resource Forecasting** (Murthy & Shri) — Addresses real-world consensus challenges in healthcare IoT by combining an Adaptive Byzantine Fault Tolerance consensus protocol with Deep Q-Learning for resource allocation and anomaly detection, demonstrating the practical need for RL-driven consensus in latency-sensitive, adversarial environments. [PubMed](https://pubmed.ncbi.nlm.nih.gov/41667513/)
+ Data Flow:
+   Agent ──action──> API ──> Orchestrator ──> Simulation ──> Nodes execute round
+   Nodes ──partial obs──> API ──obs+reward──> Agent
+   BFA ──disruption──> Network Sim ──delayed/dropped msgs──> Honest Nodes
+   Oracle ──safety check──> Simulation (terminates on violation)
+   Curriculum ──advances difficulty──> BFA (escalates attack strategies)
+```
 
-These works collectively validate the core premise behind Accordis: static consensus configurations are insufficient for real-world deployments, and reinforcement learning offers a principled path toward adaptive, self-tuning protocols.
-
----
-
-# What Accordis Simulates
-
-### Consensus Protocol — Chained HotStuff
+### Consensus Protocol Simulator
 
 The core simulation runs a **Chained HotStuff** consensus engine entirely in memory. Chained HotStuff is a pipelined BFT consensus protocol designed for high throughput in partially synchronous networks. The simulation implements:
 
@@ -128,6 +168,18 @@ Three rotation policies are supported, escalating with curriculum level:
 - **Built-in correctness oracle.** Every step is verified against formal safety invariants (Agreement, Validity, Liveness). An agent cannot score well through unsafe configurations — the episode terminates immediately on a safety violation.
 - **Baseline comparison baked in.** Every episode is evaluated against static default parameters using the same adversary seed, directly answering: "Is the RL agent actually better than leaving the defaults alone?"
 - **Reproducible and deterministic.** Seeded adversary selection enables exact episode replay for debugging, ablations, and fair cross-agent comparison.
+
+---
+
+# Related Work
+
+The problem of adaptive consensus tuning under dynamic conditions is an active area of research. The following papers explore complementary approaches:
+
+- **BFTBrain: Adaptive BFT Consensus with Reinforcement Learning** (Wu et al.) — Demonstrates that no single BFT protocol performs optimally across all conditions. Uses reinforcement learning to dynamically switch between multiple BFT protocols in real time, with a decentralized learning coordination mechanism resilient to adversarial data manipulation. [arXiv:2408.06432](https://arxiv.org/html/2408.06432v1)
+- **Meta Reinforcement Learning Based Dynamic Tuning for Blockchain Systems in Diverse Network Environments** (Pei et al.) — Proposes MetaTune, a meta-RL framework that automatically discovers optimal blockchain parameter configurations as network bandwidth fluctuates. Tested on the ChainMaker platform, it shows that adaptive approaches significantly reduce the data samples needed to generalize across varying conditions compared to non-adaptive methods. [Elsevier](https://www.sciencedirect.com/science/article/pii/S2096720924000745)
+- **An Adaptive Blockchain Framework for Federated IoMT with Reinforcement Learning-Based Consensus and Resource Forecasting** (Murthy & Shri) — Addresses real-world consensus challenges in healthcare IoT by combining an Adaptive Byzantine Fault Tolerance consensus protocol with Deep Q-Learning for resource allocation and anomaly detection, demonstrating the practical need for RL-driven consensus in latency-sensitive, adversarial environments. [PubMed](https://pubmed.ncbi.nlm.nih.gov/41667513/)
+
+These works collectively validate the core premise behind Accordis: static consensus configurations are insufficient for real-world deployments, and reinforcement learning offers a principled path toward adaptive, self-tuning protocols.
 
 ---
 
@@ -211,7 +263,7 @@ Three benchmark tasks span eight curriculum levels, designed to progressively ch
 - **Nodes**: 4 honest, 0 (level 1) / 1 (level 2) Byzantine
 - **Strategy**: `NONE` / `RANDOM_DELAY`
 - **Leader rotation**: Round Robin
-- **Max steps**: 50 (Max steps have been reduced to 40 to mitigate the errors while running the inference.py submission in phase 2 validation)
+- **Max steps**: 50  `(Max steps have been reduced to 40 to mitigate the errors while running the inference.py submission in phase 2 validation)`
 - **Grader**: `0.5 * liveness_rate + 0.3 * max(0, 1 - vc_count/5) + 0.2 * correctness`
 
 ### Medium (`medium`)
@@ -220,7 +272,7 @@ Three benchmark tasks span eight curriculum levels, designed to progressively ch
 - **Nodes**: 7 honest, 2 Byzantine (1 crash + 1 active)
 - **Strategy**: `SELECTIVE_DELAY` / `EQUIVOCATION` / `ADAPTIVE_MIRROR`
 - **Leader rotation**: Round Robin
-- **Max steps**: 100 (Since this is a long running task with multiple trajectories, Max steps have been reduced to 40 to mitigate the errors while running the inference.py submission in phase 2 validation)
+- **Max steps**: 100 ` (Since this is a long running task with multiple trajectories, Max steps have been reduced to 40 to mitigate the errors while running the inference.py submission in phase 2 validation)`
 - **Grader**: `0.4 * liveness_rate + 0.2 * max(0, 1 - vc_count/10) + 0.2 * recovery_bonus + 0.2 * correctness`
 
 ### Hard (`hard`)
@@ -230,7 +282,7 @@ Three benchmark tasks span eight curriculum levels, designed to progressively ch
 - **Strategy**: `LEADER_SUPPRESS + SELECTIVE_DELAY` (lvl 6), `CASCADE_TIMING + EQUIVOCATION` (lvl 7), full coalition (lvl 8)
 - **Leader rotation**: Round Robin (lvl 6) -> VRF (lvl 7) -> Reputation Weighted (lvl 8)
 - **Pool size**: 1800 transactions
-- **Max steps**: 100 (Since this is a long running task with multiple trajectories, Max steps have been reduced to 40 to mitigate the errors while running the inference.py submission in phase 2 validation)
+- **Max steps**: 100 ` (Since this is a long running task with multiple trajectories, Max steps have been reduced to 40 to mitigate the errors while running the inference.py submission in phase 2 validation)`
 - **Grader**: `0.05 * liveness_rate + 0.75 * throughput_score + 0.10 * vc_penalty + 0.10 * correctness`
 - **Expected scores at level 6**: static defaults ~0.26, median LLM ~0.42, expert agent ~0.76
 
